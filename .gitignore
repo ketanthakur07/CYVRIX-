@@ -1,0 +1,56 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment files
+.env
+.env.local
+.env.*.local
+infra/e2e.env
+
+# Build outputs
+.next/
+out/
+build/
+dist/
+*.egg-info/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+.venv/
+venv/
+.pytest_cache/
+
+# Docker
+docker-compose.override.yml
+
+# Test artifacts
+htmlcov/
+.coverage
+coverage/
+test-results/
+playwright-report/
+.swc/
+tsconfig.tsbuildinfo
+
+# Secrets and keys
+*.pem
+*.key
+*.p12
+*.pfx

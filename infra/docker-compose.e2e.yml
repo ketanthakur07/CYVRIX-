@@ -1,0 +1,124 @@
+# CYVRIX Golden Path E2E — Real Stack + Mock External Providers
+# Only GitHub, OSV, and LLM are mocked at their provider boundaries.
+# All CYVRIX internal services are REAL.
+#
+# IMPORTANT: Run `cp e2e.env.example e2e.env` before starting.
+# The e2e.env file contains test credentials and is gitignored.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cyvrix_test
+      POSTGRES_PASSWORD: cyvrix_test_password
+      POSTGRES_DB: cyvrix_test
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata_e2e:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cyvrix_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  mock-providers:
+    build:
+      context: ..
+      dockerfile: services/mock-providers/Dockerfile
+    volumes:
+      - ../tests/fixtures:/fixtures:ro
+    ports:
+      - "8100:8100"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    ports:
+      - "8001:8000"
+    env_file:
+      - ./e2e.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://cyvrix_test:cyvrix_test_password@postgres:5432/cyvrix_test
+      DATABASE_URL_SYNC: postgresql://cyvrix_test:cyvrix_test_password@postgres:5432/cyvrix_test
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: test-secret-key-for-integration-only-not-for-production-32chars!
+      ENVIRONMENT: test
+      APP_URL: http://localhost:3001
+      API_URL: http://localhost:8001
+      GITHUB_CLIENT_ID: test-github-client-id
+      GITHUB_CLIENT_SECRET: test-github-client-secret
+      GITHUB_APP_ID: "12345"
+      GITHUB_API_BASE: http://mock-providers:8100
+      OSV_BATCH_URL: http://mock-providers:8100/v1/querybatch
+      OPENAI_API_KEY: mock-key
+      OPENAI_API_BASE: http://mock-providers:8100
+      OPENAI_MODEL: gpt-4o-mini
+      SESSION_TTL_SECONDS: 3600
+      COOKIE_SECURE: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock-providers:
+        condition: service_started
+
+  worker:
+    build:
+      context: ..
+      dockerfile: services/worker/Dockerfile
+    env_file:
+      - ./e2e.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://cyvrix_test:cyvrix_test_password@postgres:5432/cyvrix_test
+      DATABASE_URL_SYNC: postgresql://cyvrix_test:cyvrix_test_password@postgres:5432/cyvrix_test
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: test-secret-key-for-integration-only-not-for-production-32chars!
+      ENVIRONMENT: test
+      GITHUB_APP_ID: "12345"
+      GITHUB_API_BASE: http://mock-providers:8100
+      GITHUB_CLONE_URL_BASE: mock-providers:8100
+      OSV_BATCH_URL: http://mock-providers:8100/v1/querybatch
+      OPENAI_API_KEY: mock-key
+      OPENAI_API_BASE: http://mock-providers:8100
+      OPENAI_MODEL: gpt-4o-mini
+      SCAN_TIMEOUT_MINUTES: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock-providers:
+        condition: service_started
+
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+    ports:
+      - "3001:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8001
+      API_BACKEND_URL: http://api:8000
+    depends_on:
+      - api
+
+volumes:
+  pgdata_e2e:
