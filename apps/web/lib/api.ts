@@ -174,3 +174,79 @@ export async function deactivateRepository(
 ): Promise<{ ok: boolean; is_active: boolean }> {
   return apiFetch(`/repositories/${id}/deactivate`, { method: "POST" });
 }
+
+// ── V2 API Functions ──────────────────────────────────────────────
+
+import type { Recommendation, Report, SourceType } from "./types";
+
+/** Trigger a container/Dockerfile security scan */
+export async function triggerContainerScan(
+  repositoryId: string
+): Promise<{ id: string }> {
+  return apiFetch<{ id: string }>(`/repositories/${repositoryId}/container-scan`, {
+    method: "POST",
+  });
+}
+
+/** Trigger a log/security analysis scan */
+export async function triggerLogAnalysis(
+  repositoryId: string
+): Promise<{ id: string }> {
+  return apiFetch<{ id: string }>(`/repositories/${repositoryId}/log-analysis`, {
+    method: "POST",
+  });
+}
+
+/** Get recommendation for a finding (read-only, 404 if not found) */
+export async function fetchRecommendation(
+  findingId: string
+): Promise<Recommendation> {
+  return apiFetch<Recommendation>(`/findings/${findingId}/recommendation`);
+}
+
+/** Generate or retrieve recommendation for a finding (POST, idempotent) */
+export async function generateRecommendation(
+  findingId: string
+): Promise<Recommendation> {
+  return apiFetch<Recommendation>(`/findings/${findingId}/recommendation`, {
+    method: "POST",
+  });
+}
+
+/** Trigger recommendation re-validation */
+export async function validateRecommendation(
+  findingId: string
+): Promise<{
+  ok: boolean;
+  validation_state: string;
+  trust_level: string | null;
+  summary: string;
+  checks: Array<{ check: string; passed: boolean; reason: string }>;
+}> {
+  return apiFetch(`/findings/${findingId}/recommendation/validate`, {
+    method: "POST",
+  });
+}
+
+/** Generate a report for a scan */
+export async function generateReport(
+  scanId: string,
+  format: "markdown" | "json" = "markdown"
+): Promise<{ id: string }> {
+  return apiFetch<{ id: string }>(`/reports/${scanId}`, {
+    method: "POST",
+    body: JSON.stringify({ format }),
+  });
+}
+
+/** Get a report by ID */
+export async function fetchReport(reportId: string): Promise<Report> {
+  return apiFetch<Report>(`/reports/${reportId}`);
+}
+
+/** List reports for a scan */
+export async function fetchReportsByScan(
+  scanId: string
+): Promise<Report[]> {
+  return apiFetch<Report[]>(`/reports/scan/${scanId}`);
+}

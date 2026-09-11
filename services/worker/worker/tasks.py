@@ -41,6 +41,217 @@ from app.services.scanner import (
 from app.services.investigation import run_investigation, InvestigationError
 from app.services.risk_engine import calculate_risk_safe, RISK_ALGO_VERSION
 from app.services.github import get_installation_access_token
+from app.services.container_scanner import scan_containers
+from app.services.log_analyzer import analyze_logs
+from app.services.recommendation_engine import generate_deterministic_recommendation
+
+
+def run_container_scan(scan_id: str):
+    """Container/Dockerfile security scan pipeline."""
+    logger.info("container_scan_started scan_id=%s", scan_id)
+    db = SessionLocal()
+    scan = None
+    workspace = None
+
+    try:
+        scan = db.get(Scan, UUID(scan_id))
+        if not scan:
+            logger.error("scan_not_found scan_id=%s", scan_id)
+            return {"error": "Scan not found"}
+
+        repo = db.get(Repository, scan.repository_id)
+        if not repo:
+            _fail_scan(db, scan, "REPOSITORY_NOT_FOUND")
+            return {"error": "Repository not found"}
+
+        if not repo.is_active:
+            _fail_scan(db, scan, "REPOSITORY_INACTIVE")
+            return {"error": "Repository inactive"}
+
+        installation = repo.installation
+        if not installation:
+            _fail_scan(db, scan, "INSTALLATION_NOT_FOUND")
+            return {"error": "Installation not found"}
+
+        workspace = tempfile.mkdtemp(prefix="cyvrix_container_")
+        os.chmod(workspace, 0o700)
+
+        try:
+            _update_status(db, scan, "CLONING")
+
+            token = asyncio.run(get_installation_access_token(installation.installation_id))
+            clone_base = settings.github_clone_url_base
+            if "mock-providers" in clone_base or "localhost" in clone_base:
+                clone_url = f"http://{clone_base}/{repo.owner}/{repo.name}.git"
+            else:
+                clone_url = f"https://x-access-token:{token}@{clone_base}/{repo.owner}/{repo.name}.git"
+
+            logger.info("clone_started scan_id=%s owner=%s repo=%s", scan_id, repo.owner, repo.name)
+            commit_sha = clone_repo(clone_url, workspace, repo.default_branch)
+            scan.commit_sha = commit_sha
+            db.commit()
+            del clone_url, token
+
+            _update_status(db, scan, "SCANNING")
+
+            scan_result = asyncio.run(scan_containers(
+                workspace, str(repo.id),
+            ))
+
+            finding_ids = []
+            for f_data in scan_result["findings"]:
+                _persist_finding(db, repo, scan, f_data, finding_ids)
+            db.commit()
+
+            _update_status(db, scan, "ANALYZING")
+
+            for fid in finding_ids:
+                finding = db.get(Finding, fid)
+                if finding:
+                    _compute_risk(db, finding, None)
+                    _generate_recommendation(db, finding)
+            db.commit()
+
+            _update_status(db, scan, "COMPLETED")
+
+            db.add(AuditEvent(
+                repository_id=repo.id,
+                event_type="CONTAINER_SCAN_COMPLETED",
+                event_metadata={
+                    "scan_id": str(scan.id),
+                    "findings_count": len(finding_ids),
+                    "dockerfiles_found": scan_result["dockerfiles_found"],
+                },
+            ))
+            db.commit()
+
+            logger.info("container_scan_completed scan_id=%s findings=%d", scan_id, len(finding_ids))
+            return {"ok": True, "findings": len(finding_ids)}
+
+        finally:
+            if workspace and os.path.exists(workspace):
+                try:
+                    shutil.rmtree(workspace, ignore_errors=True)
+                except Exception:
+                    pass
+
+    except Exception as e:
+        error_msg = f"CONTAINER_SCAN_FAILED: {str(e)[:200]}"
+        if scan is not None:
+            _fail_scan(db, scan, error_msg)
+        logger.error("container_scan_failed scan_id=%s error=%s", scan_id, str(e)[:200])
+        return {"error": str(e)[:500]}
+    finally:
+        if workspace and os.path.exists(workspace):
+            try:
+                shutil.rmtree(workspace, ignore_errors=True)
+            except Exception:
+                pass
+        db.close()
+
+
+def run_log_analysis(scan_id: str):
+    """Log/security analysis pipeline."""
+    logger.info("log_analysis_started scan_id=%s", scan_id)
+    db = SessionLocal()
+    scan = None
+    workspace = None
+
+    try:
+        scan = db.get(Scan, UUID(scan_id))
+        if not scan:
+            logger.error("scan_not_found scan_id=%s", scan_id)
+            return {"error": "Scan not found"}
+
+        repo = db.get(Repository, scan.repository_id)
+        if not repo:
+            _fail_scan(db, scan, "REPOSITORY_NOT_FOUND")
+            return {"error": "Repository not found"}
+
+        if not repo.is_active:
+            _fail_scan(db, scan, "REPOSITORY_INACTIVE")
+            return {"error": "Repository inactive"}
+
+        installation = repo.installation
+        if not installation:
+            _fail_scan(db, scan, "INSTALLATION_NOT_FOUND")
+            return {"error": "Installation not found"}
+
+        workspace = tempfile.mkdtemp(prefix="cyvrix_log_")
+        os.chmod(workspace, 0o700)
+
+        try:
+            _update_status(db, scan, "CLONING")
+
+            token = asyncio.run(get_installation_access_token(installation.installation_id))
+            clone_base = settings.github_clone_url_base
+            if "mock-providers" in clone_base or "localhost" in clone_base:
+                clone_url = f"http://{clone_base}/{repo.owner}/{repo.name}.git"
+            else:
+                clone_url = f"https://x-access-token:{token}@{clone_base}/{repo.owner}/{repo.name}.git"
+
+            logger.info("clone_started scan_id=%s owner=%s repo=%s", scan_id, repo.owner, repo.name)
+            commit_sha = clone_repo(clone_url, workspace, repo.default_branch)
+            scan.commit_sha = commit_sha
+            db.commit()
+            del clone_url, token
+
+            _update_status(db, scan, "SCANNING")
+
+            scan_result = asyncio.run(analyze_logs(
+                workspace, str(repo.id),
+            ))
+
+            finding_ids = []
+            for f_data in scan_result["findings"]:
+                _persist_finding(db, repo, scan, f_data, finding_ids)
+            db.commit()
+
+            _update_status(db, scan, "ANALYZING")
+
+            for fid in finding_ids:
+                finding = db.get(Finding, fid)
+                if finding:
+                    _compute_risk(db, finding, None)
+                    _generate_recommendation(db, finding)
+            db.commit()
+
+            _update_status(db, scan, "COMPLETED")
+
+            db.add(AuditEvent(
+                repository_id=repo.id,
+                event_type="LOG_ANALYSIS_COMPLETED",
+                event_metadata={
+                    "scan_id": str(scan.id),
+                    "findings_count": len(finding_ids),
+                    "log_files_found": scan_result["log_files_found"],
+                },
+            ))
+            db.commit()
+
+            logger.info("log_analysis_completed scan_id=%s findings=%d", scan_id, len(finding_ids))
+            return {"ok": True, "findings": len(finding_ids)}
+
+        finally:
+            if workspace and os.path.exists(workspace):
+                try:
+                    shutil.rmtree(workspace, ignore_errors=True)
+                except Exception:
+                    pass
+
+    except Exception as e:
+        error_msg = f"LOG_ANALYSIS_FAILED: {str(e)[:200]}"
+        if scan is not None:
+            _fail_scan(db, scan, error_msg)
+        logger.error("log_analysis_failed scan_id=%s error=%s", scan_id, str(e)[:200])
+        return {"error": str(e)[:500]}
+    finally:
+        if workspace and os.path.exists(workspace):
+            try:
+                shutil.rmtree(workspace, ignore_errors=True)
+            except Exception:
+                pass
+        db.close()
 
 
 def run_scan(scan_id: str):
@@ -156,6 +367,13 @@ def run_scan(scan_id: str):
             _update_status(db, scan, "COMPLETED")
 
             # Audit event (no credentials)
+            # Generate recommendations for findings
+            for fid in finding_ids:
+                finding = db.get(Finding, fid)
+                if finding:
+                    _generate_recommendation(db, finding)
+            db.commit()
+
             db.add(AuditEvent(
                 repository_id=repo.id,
                 event_type="SCAN_COMPLETED",
@@ -201,9 +419,13 @@ def run_scan(scan_id: str):
 
 
 def _persist_finding(db: Session, repo, scan, f_data: dict, finding_ids: list):
-    """Persist a finding with dedup via fingerprint.
+    """Persist a V2 finding with dedup via fingerprint.
 
-    Uses database unique constraint as the final dedup backstop.
+    Persists full V2 provenance, including source_type and evidence,
+    so container and log findings are not dependent on database defaults
+    for semantic correctness.
+
+    Uses the database unique constraint as the final dedup backstop.
     """
     try:
         existing = db.execute(
@@ -222,6 +444,7 @@ def _persist_finding(db: Session, repo, scan, f_data: dict, finding_ids: list):
                 repository_id=repo.id,
                 fingerprint=f_data["fingerprint"],
                 scanner=f_data["scanner"],
+                source_type=f_data.get("source_type") or "DEPENDENCY",
                 vulnerability_id=str(f_data.get("vulnerability_id", ""))[:200],
                 package_name=str(f_data.get("package_name", ""))[:500],
                 package_version=str(f_data.get("package_version", ""))[:200],
@@ -229,6 +452,7 @@ def _persist_finding(db: Session, repo, scan, f_data: dict, finding_ids: list):
                 description=str(f_data.get("description", ""))[:5000],
                 severity=f_data["severity"],
                 status="OPEN",
+                evidence=f_data.get("evidence"),
             )
             db.add(finding)
             db.flush()
@@ -395,6 +619,43 @@ def _compute_risk(db: Session, finding, investigation_result):
         factors=factors.model_dump(),
     )
     db.add(assessment)
+
+
+def _generate_recommendation(db: Session, finding):
+    """Generate a deterministic recommendation for a finding."""
+    try:
+        finding_dict = {
+            "id": str(finding.id),
+            "scanner": finding.scanner,
+            "source_type": finding.source_type,
+            "title": finding.title,
+            "description": finding.description,
+            "severity": finding.severity,
+            "vulnerability_id": finding.vulnerability_id,
+            "package_name": finding.package_name,
+            "package_version": finding.package_version,
+            "evidence": finding.evidence or {},
+        }
+        rec = generate_deterministic_recommendation(finding_dict)
+        if rec:
+            from app.models import Recommendation
+            recommendation = Recommendation(
+                finding_id=finding.id,
+                status="COMPLETED",
+                trust_level=rec["trust_level"],
+                title=rec["title"],
+                what=rec.get("what"),
+                why=rec.get("why"),
+                change=rec.get("change"),
+                uncertainty=rec.get("uncertainty"),
+                risk=rec.get("risk"),
+                validation=rec.get("validation"),
+                evidence=rec.get("evidence"),
+                created_at=datetime.now(timezone.utc),
+            )
+            db.add(recommendation)
+    except Exception as e:
+        logger.warning("recommendation_generation_failed finding_id=%s error=%s", finding.id, str(e)[:100])
 
 
 def _update_status(db: Session, scan: Scan, status: str):

@@ -719,6 +719,7 @@ def normalize_findings(
                 "description": description,
                 "severity": severity,
                 "scanner": "dependency",
+                "source_type": "DEPENDENCY",
                 "aliases": vuln.get("aliases", []),
             })
 

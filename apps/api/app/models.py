@@ -63,6 +63,7 @@ class Repository(Base):
     installation = relationship("GithubInstallation", back_populates="repositories")
     scans = relationship("Scan", back_populates="repository")
     findings = relationship("Finding", back_populates="repository")
+    reports = relationship("Report", back_populates="repository")
 
 
 class Scan(Base):
@@ -81,6 +82,7 @@ class Scan(Base):
     repository = relationship("Repository", back_populates="scans")
     dependencies = relationship("Dependency", back_populates="scan")
     findings = relationship("Finding", back_populates="scan")
+    reports = relationship("Report", back_populates="scan")
 
 
 class Dependency(Base):
@@ -104,6 +106,7 @@ class Finding(Base):
     repository_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id"), nullable=False)
     fingerprint = Column(Text, nullable=False)
     scanner = Column(Text, nullable=False, default="dependency")
+    source_type = Column(Text, nullable=False, default="DEPENDENCY")  # DEPENDENCY|CONTAINER|LOG
     vulnerability_id = Column(Text)
     package_name = Column(Text)
     package_version = Column(Text)
@@ -111,18 +114,21 @@ class Finding(Base):
     description = Column(Text)
     severity = Column(Text, nullable=False)  # LOW|MEDIUM|HIGH|CRITICAL
     status = Column(Text, nullable=False, default="OPEN")  # OPEN|CONFIRMED|FALSE_POSITIVE|RESOLVED
+    evidence = Column(JSONB)  # source-specific evidence metadata
     created_at = Column(DateTime(timezone=True), default=utcnow)
 
     __table_args__ = (
         UniqueConstraint("repository_id", "fingerprint", name="uq_repo_fingerprint"),
         Index("ix_findings_scan_id", "scan_id"),
         Index("ix_findings_severity", "severity"),
+        Index("ix_findings_source_type", "source_type"),
     )
 
     scan = relationship("Scan", back_populates="findings")
     repository = relationship("Repository", back_populates="findings")
     investigation = relationship("Investigation", back_populates="finding", uselist=False)
     risk_assessment = relationship("RiskAssessment", back_populates="finding", uselist=False)
+    recommendation = relationship("Recommendation", back_populates="finding", uselist=False)
 
 
 class Investigation(Base):
@@ -158,6 +164,46 @@ class RiskAssessment(Base):
     created_at = Column(DateTime(timezone=True), default=utcnow)
 
     finding = relationship("Finding", back_populates="risk_assessment")
+
+
+class Recommendation(Base):
+    __tablename__ = "recommendations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    finding_id = Column(UUID(as_uuid=True), ForeignKey("findings.id"), nullable=False)
+    status = Column(Text, nullable=False, default="PENDING")  # PENDING|COMPLETED|FAILED
+    trust_level = Column(Text)  # SUPPORTED|LIKELY|UNCERTAIN
+    title = Column(Text, nullable=False)
+    description = Column(Text)
+    what = Column(Text)  # What is the problem
+    why = Column(Text)   # Why does it matter
+    change = Column(Text)  # What change is recommended
+    uncertainty = Column(Text)  # What uncertainty exists
+    risk = Column(Text)  # What could break
+    validation = Column(Text)  # How should it be validated
+    evidence = Column(JSONB)
+    raw_model_response = Column(JSONB)
+    validation_state = Column(Text)  # VALIDATED|PARTIALLY_VALIDATED|UNVERIFIED|UNSAFE
+    validation_details = Column(JSONB)  # evidence checks, reasons
+    validated_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
+    finding = relationship("Finding", back_populates="recommendation")
+
+
+class Report(Base):
+    __tablename__ = "reports"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.id"), nullable=False)
+    repository_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id"), nullable=False)
+    report_type = Column(Text, nullable=False)  # SCAN|REPOSITORY
+    format = Column(Text, nullable=False, default="markdown")  # markdown|json
+    content = Column(Text)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
+    scan = relationship("Scan")
+    repository = relationship("Repository")
 
 
 class AuditEvent(Base):

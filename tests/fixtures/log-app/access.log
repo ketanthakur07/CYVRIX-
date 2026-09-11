@@ -1,0 +1,11 @@
+2026-09-01T10:00:01Z INFO GET /api/users 200 user=admin source_ip=192.168.1.100
+2026-09-01T10:00:02Z INFO POST /api/login 401 user=unknown source_ip=10.0.0.50
+2026-09-01T10:00:03Z INFO POST /api/login 401 user=unknown source_ip=10.0.0.50
+2026-09-01T10:00:04Z INFO POST /api/login 401 user=unknown source_ip=10.0.0.50
+2026-09-01T10:00:05Z INFO POST /api/login 401 user=unknown source_ip=10.0.0.50
+2026-09-01T10:00:06Z INFO POST /api/login 401 user=unknown source_ip=10.0.0.50
+2026-09-01T10:00:07Z INFO POST /api/login 401 user=unknown source_ip=10.0.0.50
+2026-09-01T10:00:10Z INFO GET /admin/dashboard 200 user=admin source_ip=192.168.1.100
+2026-09-01T10:00:15Z WARN GET /etc/passwd 403 user=unknown source_ip=10.0.0.50
+2026-09-01T10:00:16Z WARN GET /etc/shadow 403 user=unknown source_ip=10.0.0.50
+2026-09-01T10:00:17Z WARN GET /.env 403 user=unknown source_ip=10.0.0.50

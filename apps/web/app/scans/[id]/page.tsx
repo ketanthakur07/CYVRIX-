@@ -18,6 +18,9 @@ import {
   SCAN_STATUS_STEPS,
   isTerminalStatus,
   VERDICT_COLORS,
+  SOURCE_TYPE_COLORS,
+  SOURCE_TYPE_ICONS,
+  TRUST_LEVEL_COLORS,
 } from "@/lib/types";
 import type { FindingDetail, ScanStatus } from "@/lib/types";
 
@@ -201,15 +204,27 @@ export default function ScanPage() {
               >
                 <div className="flex items-start justify-between">
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
                       <span
                         className={`px-2 py-0.5 rounded text-xs font-medium border ${SEVERITY_COLORS[finding.severity] || SEVERITY_COLORS.UNKNOWN}`}
                       >
                         {finding.severity}
                       </span>
+                      <span
+                        className={`px-2 py-0.5 rounded text-xs font-medium border ${SOURCE_TYPE_COLORS[finding.source_type] || SOURCE_TYPE_COLORS.DEPENDENCY}`}
+                      >
+                        {SOURCE_TYPE_ICONS[finding.source_type] || "📦"} {finding.source_type}
+                      </span>
                       {finding.vulnerability_id && (
                         <span className="text-xs font-mono text-gray-500">
                           {finding.vulnerability_id}
+                        </span>
+                      )}
+                      {finding.recommendation?.trust_level && (
+                        <span
+                          className={`px-2 py-0.5 rounded text-xs font-medium ${TRUST_LEVEL_COLORS[finding.recommendation.trust_level] || TRUST_LEVEL_COLORS.UNCERTAIN}`}
+                        >
+                          {finding.recommendation.trust_level}
                         </span>
                       )}
                     </div>

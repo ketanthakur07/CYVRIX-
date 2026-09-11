@@ -28,14 +28,6 @@ TEST_MIGRATION_DB_URL = "sqlite+aiosqlite:///test_migration.db"
 
 
 @pytest.fixture(scope="module")
-def event_loop():
-    import asyncio
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture(scope="module")
 async def engine():
     eng = create_async_engine(TEST_MIGRATION_DB_URL)
     async with eng.begin() as conn:
@@ -335,3 +327,147 @@ class TestSchemaDrift:
         assert model_tables.issubset(db_tables), (
             f"Schema drift: missing tables {model_tables - db_tables}"
         )
+
+
+class TestSourceTypePersistence:
+    """DB-level regression proving source_type and evidence persist correctly."""
+
+    @pytest.mark.asyncio
+    async def test_dependency_finding_source_type_persists(self, engine):
+        """DEPENDENCY finding persists source_type=DEPENDENCY and evidence in DB."""
+        session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        async with session_factory() as session:
+            user = User(id=uuid4(), email="dep-test@test.com", github_id=30001)
+            session.add(user)
+            await session.flush()
+            inst = GithubInstallation(
+                id=uuid4(), user_id=user.id, installation_id=30010,
+                account_login="dep-org", account_type="Organization",
+            )
+            session.add(inst)
+            await session.flush()
+            repo = Repository(
+                id=uuid4(), installation_id=inst.id, github_repo_id=30011,
+                owner="dep-org", name="dep-repo", default_branch="main", is_active=True,
+            )
+            session.add(repo)
+            await session.flush()
+            scan = Scan(
+                id=uuid4(), repository_id=repo.id, status="COMPLETED",
+                trigger="manual", commit_sha="dep123",
+            )
+            session.add(scan)
+            await session.flush()
+            finding = Finding(
+                id=uuid4(), scan_id=scan.id, repository_id=repo.id,
+                fingerprint="dep-fp-001", scanner="dependency",
+                source_type="DEPENDENCY",
+                vulnerability_id="CVE-2024-9999",
+                package_name="lodash", package_version="4.17.20",
+                title="Test dependency vuln", severity="HIGH", status="OPEN",
+                evidence={"rule": "dependency_upgrade", "manifest": "package.json"},
+            )
+            session.add(finding)
+            await session.commit()
+            finding_id = finding.id
+
+        # Re-read from DB and verify
+        async with session_factory() as session:
+            f = await session.get(Finding, finding_id)
+            assert f is not None
+            assert f.source_type == "DEPENDENCY", f"Expected DEPENDENCY, got {f.source_type}"
+            assert f.evidence is not None, "Evidence should not be None"
+            assert f.evidence["rule"] == "dependency_upgrade"
+            assert f.evidence["manifest"] == "package.json"
+
+    @pytest.mark.asyncio
+    async def test_container_finding_source_type_persists(self, engine):
+        """CONTAINER finding persists source_type=CONTAINER and evidence in DB."""
+        session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        async with session_factory() as session:
+            user = User(id=uuid4(), email="cont-test@test.com", github_id=30002)
+            session.add(user)
+            await session.flush()
+            inst = GithubInstallation(
+                id=uuid4(), user_id=user.id, installation_id=30020,
+                account_login="cont-org", account_type="Organization",
+            )
+            session.add(inst)
+            await session.flush()
+            repo = Repository(
+                id=uuid4(), installation_id=inst.id, github_repo_id=30021,
+                owner="cont-org", name="cont-repo", default_branch="main", is_active=True,
+            )
+            session.add(repo)
+            await session.flush()
+            scan = Scan(
+                id=uuid4(), repository_id=repo.id, status="COMPLETED",
+                trigger="manual", commit_sha="cont123",
+            )
+            session.add(scan)
+            await session.flush()
+            finding = Finding(
+                id=uuid4(), scan_id=scan.id, repository_id=repo.id,
+                fingerprint="cont-fp-001", scanner="container",
+                source_type="CONTAINER",
+                title="Container runs as root", severity="MEDIUM", status="OPEN",
+                evidence={"dockerfile": "Dockerfile", "has_user": False},
+            )
+            session.add(finding)
+            await session.commit()
+            finding_id = finding.id
+
+        async with session_factory() as session:
+            f = await session.get(Finding, finding_id)
+            assert f is not None
+            assert f.source_type == "CONTAINER", f"Expected CONTAINER, got {f.source_type}"
+            assert f.evidence is not None
+            assert f.evidence["dockerfile"] == "Dockerfile"
+            assert f.evidence["has_user"] is False
+
+    @pytest.mark.asyncio
+    async def test_log_finding_source_type_persists(self, engine):
+        """LOG finding persists source_type=LOG and evidence in DB."""
+        session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        async with session_factory() as session:
+            user = User(id=uuid4(), email="log-test@test.com", github_id=30003)
+            session.add(user)
+            await session.flush()
+            inst = GithubInstallation(
+                id=uuid4(), user_id=user.id, installation_id=30030,
+                account_login="log-org", account_type="Organization",
+            )
+            session.add(inst)
+            await session.flush()
+            repo = Repository(
+                id=uuid4(), installation_id=inst.id, github_repo_id=30031,
+                owner="log-org", name="log-repo", default_branch="main", is_active=True,
+            )
+            session.add(repo)
+            await session.flush()
+            scan = Scan(
+                id=uuid4(), repository_id=repo.id, status="COMPLETED",
+                trigger="manual", commit_sha="log123",
+            )
+            session.add(scan)
+            await session.flush()
+            finding = Finding(
+                id=uuid4(), scan_id=scan.id, repository_id=repo.id,
+                fingerprint="log-fp-001", scanner="log_analyzer",
+                source_type="LOG",
+                title="Potential brute-force pattern", severity="HIGH", status="OPEN",
+                evidence={"log_source": "access.log", "event_count": 15},
+            )
+            session.add(finding)
+            await session.commit()
+            finding_id = finding.id
+
+        async with session_factory() as session:
+            f = await session.get(Finding, finding_id)
+            assert f is not None
+            assert f.source_type == "LOG", f"Expected LOG, got {f.source_type}"
+            assert f.evidence is not None
+            assert f.evidence["log_source"] == "access.log"
+            assert f.evidence["event_count"] == 15
+
+

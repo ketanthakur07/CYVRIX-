@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.database import init_db
 from app.config import get_settings
 from app.routes import repos, scans, findings, github, dashboard, auth
+from app.routes import container, recommendations, reports
 from app.session import get_redis, close_redis
 import logging
 
@@ -46,7 +47,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="CYVRIX API",
     description="Autonomous Security Intelligence Platform",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -59,7 +60,7 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "Accept"],
 )
 
-# Include routers
+# Include routers (V1)
 app.include_router(auth.router)
 app.include_router(repos.router)
 app.include_router(scans.router)
@@ -67,11 +68,16 @@ app.include_router(findings.router)
 app.include_router(github.router)
 app.include_router(dashboard.router)
 
+# Include V2 routers
+app.include_router(container.router)
+app.include_router(recommendations.router)
+app.include_router(reports.router)
+
 
 @app.get("/api/health/live")
 async def liveness():
     """Liveness probe: API is running."""
-    return {"status": "alive", "version": "1.0.0"}
+    return {"status": "alive", "version": "2.0.0"}
 
 
 @app.get("/api/health/ready")

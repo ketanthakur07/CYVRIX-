@@ -16,6 +16,8 @@ export type ScanStatus =
 
 export type Severity = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" | "UNKNOWN";
 
+export type SourceType = "DEPENDENCY" | "CONTAINER" | "LOG";
+
 export type FindingStatus =
   | "OPEN"
   | "CONFIRMED"
@@ -122,6 +124,7 @@ export interface Finding {
   repository_id: string;
   fingerprint: string;
   scanner: string;
+  source_type: SourceType;
   vulnerability_id: string | null;
   package_name: string | null;
   package_version: string | null;
@@ -132,9 +135,46 @@ export interface Finding {
   created_at: string;
 }
 
+export type TrustLevel = "SUPPORTED" | "LIKELY" | "UNCERTAIN";
+
+export type ValidationState = "VALIDATED" | "PARTIALLY_VALIDATED" | "UNVERIFIED" | "UNSAFE";
+
+export interface Recommendation {
+  id: string;
+  finding_id: string;
+  status: string;
+  trust_level: TrustLevel | null;
+  title: string;
+  description: string | null;
+  what: string | null;
+  why: string | null;
+  change: string | null;
+  uncertainty: string | null;
+  risk: string | null;
+  validation: string | null;
+  validation_state: ValidationState | null;
+  validation_details: {
+    checks: Array<{ check: string; passed: boolean; reason: string }>;
+    summary: string;
+  } | null;
+  validated_at: string | null;
+  created_at: string;
+}
+
+export interface Report {
+  id: string;
+  scan_id: string;
+  repository_id: string;
+  report_type: string;
+  format: string;
+  content: string | null;
+  created_at: string;
+}
+
 export interface FindingDetail extends Finding {
   investigation: Investigation | null;
   risk_assessment: RiskAssessment | null;
+  recommendation: Recommendation | null;
 }
 
 // ── Severity Count ─────────────────────────────────────────────────
@@ -219,3 +259,34 @@ export const SCAN_STATUS_STEPS: ScanStatus[] = [
 export function isTerminalStatus(status: ScanStatus): boolean {
   return status === "COMPLETED" || status === "FAILED";
 }
+
+// ── V2 Source Type Colors ─────────────────────────────────────────
+
+export const SOURCE_TYPE_COLORS: Record<SourceType, string> = {
+  DEPENDENCY: "bg-blue-100 text-blue-800 border-blue-200",
+  CONTAINER: "bg-purple-100 text-purple-800 border-purple-200",
+  LOG: "bg-teal-100 text-teal-800 border-teal-200",
+};
+
+export const SOURCE_TYPE_ICONS: Record<SourceType, string> = {
+  DEPENDENCY: "📦",
+  CONTAINER: "🐳",
+  LOG: "📋",
+};
+
+// ── V2 Trust Level Colors ─────────────────────────────────────────
+
+export const TRUST_LEVEL_COLORS: Record<TrustLevel, string> = {
+  SUPPORTED: "bg-green-100 text-green-800",
+  LIKELY: "bg-yellow-100 text-yellow-800",
+  UNCERTAIN: "bg-gray-100 text-gray-600",
+};
+
+// ── V2 Validation State Colors ────────────────────────────────────
+
+export const VALIDATION_STATE_COLORS: Record<ValidationState, string> = {
+  VALIDATED: "bg-green-100 text-green-800",
+  PARTIALLY_VALIDATED: "bg-yellow-100 text-yellow-800",
+  UNVERIFIED: "bg-gray-100 text-gray-600",
+  UNSAFE: "bg-red-100 text-red-800",
+};

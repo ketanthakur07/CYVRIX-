@@ -1,0 +1,7 @@
+{"timestamp": "2026-09-01T10:00:01Z", "level": "INFO", "message": "Authentication successful", "user": "admin", "source_ip": "192.168.1.100"}
+{"timestamp": "2026-09-01T10:00:02Z", "level": "ERROR", "message": "Authentication failed", "user": "unknown", "source_ip": "10.0.0.50"}
+{"timestamp": "2026-09-01T10:00:03Z", "level": "ERROR", "message": "Authentication failed", "user": "unknown", "source_ip": "10.0.0.50"}
+{"timestamp": "2026-09-01T10:00:04Z", "level": "ERROR", "message": "Authentication failed", "user": "unknown", "source_ip": "10.0.0.50"}
+{"timestamp": "2026-09-01T10:00:05Z", "level": "ERROR", "message": "Authentication failed", "user": "unknown", "source_ip": "10.0.0.50"}
+{"timestamp": "2026-09-01T10:00:06Z", "level": "ERROR", "message": "Authentication failed", "user": "unknown", "source_ip": "10.0.0.50"}
+{"timestamp": "2026-09-01T10:00:07Z", "level": "WARN", "message": "Suspicious path access detected", "user": "unknown", "source_ip": "10.0.0.50", "path": "/etc/passwd"}

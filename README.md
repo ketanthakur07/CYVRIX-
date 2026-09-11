@@ -40,13 +40,37 @@ Browser → Next.js → FastAPI → PostgreSQL / Redis → RQ Worker
 | Containerization | Docker, Docker Compose |
 | CI/CD | GitHub Actions (lint, type-check, unit/integration/E2E tests) |
 
-## V1 Features
+## V2 Features
 
 1. **GitHub App Integration** — OAuth login, installation management, repository discovery
 2. **Dependency Vulnerability Scanner** — npm (package.json, package-lock.json) and Python (requirements.txt, poetry.lock) via OSV.dev batch queries
-3. **AI Investigation Agent** — Single bounded LLM call per HIGH/CRITICAL finding with Pydantic-validated output, evidence cross-validation, and prompt-injection defenses
-4. **Deterministic Risk Engine** — Pure function scoring (0–100) based on severity, exposure, exploitability, and confidence; versioned algorithm with explainable factors
-5. **Security Dashboard** — Real-time scan status, findings detail, risk scores, and AI investigation results
+3. **Container/Dockerfile Scanner (V2.1)** — Static analysis of Dockerfiles for root user, unpinned images, curl-pipe-shell patterns, secrets in ENV, sensitive ports, missing HEALTHCHECK
+4. **Security Log Analyzer (V2.2)** — Pattern-based detection of brute-force attacks, admin access anomalies, path probing from text and JSON log files
+5. **AI Investigation Agent** — Single bounded LLM call per HIGH/CRITICAL finding with Pydantic-validated output, evidence cross-validation, and prompt-injection defenses
+6. **Deterministic Risk Engine** — Pure function scoring (0–100) based on severity, exposure, exploitability, and confidence; versioned algorithm with explainable factors
+7. **Recommendation Engine (V2.5)** — Evidence-based remediation recommendations with trust levels (SUPPORTED, LIKELY, UNCERTAIN); deterministic rules + AI fallback
+8. **Recommendation Re-validation (V2.6)** — Deterministic validation of recommendations against evidence; states: VALIDATED, PARTIALLY_VALIDATED, UNVERIFIED, UNSAFE
+9. **Report Engine** — On-demand security reports in Markdown and JSON formats
+10. **Security Dashboard** — Real-time scan status, findings detail, risk scores, source-type badges, recommendation section, and AI investigation results
+
+### Source Types
+
+| Source | Scanner | Evidence |
+|--------|---------|----------|
+| DEPENDENCY | OSV.dev batch queries | package.json, requirements.txt |
+| CONTAINER | Dockerfile static analysis | Dockerfile instructions |
+| LOG | Pattern-based detection | access.log, security.log |
+
+### Recommendation Validation
+
+| State | Meaning |
+|-------|--------|
+| VALIDATED | All claims supported by evidence |
+| PARTIALLY_VALIDATED | Some claims supported, some uncertain |
+| UNVERIFIED | Insufficient evidence to validate |
+| UNSAFE | Recommendation contradicted by evidence or policies |
+
+**Important:** Recommendations are advisory only. CYVRIX never modifies files, pushes code, creates PRs, merges, or deploys.
 
 ## Quick Start
 
@@ -138,16 +162,17 @@ When `ENVIRONMENT=production`:
 
 ### Scanning Pipeline
 
-1. User clicks **Run Scan** on a repository
+1. User clicks **Run Scan**, **Container Scan**, or **Log Analysis** on a repository
 2. API creates a scan record (status: QUEUED) and enqueues an RQ job
 3. Worker picks up the job and clones the repository (shallow, 120s timeout)
-4. Scanner detects manifests (package.json, requirements.txt, etc.)
-5. Dependencies are parsed and batched into OSV.dev queries
-6. Vulnerability results are normalized into findings with severity scores
+4. **Dependency scan:** Scanner detects manifests → parses deps → queries OSV.dev → normalizes findings
+5. **Container scan:** Dockerfile detection → static analysis → security rule checks → normalized findings
+6. **Log analysis:** Log file detection → pattern matching → event correlation → normalized findings
 7. HIGH/CRITICAL findings receive AI investigation (single LLM call)
 8. Evidence is cross-validated against supplied code snippets
 9. Deterministic risk scores are computed for all findings
-10. Results are persisted to PostgreSQL and appear on the dashboard
+10. Deterministic recommendations are generated for all findings
+11. Results are persisted to PostgreSQL and appear on the dashboard
 
 ### AI Investigation
 
@@ -156,6 +181,20 @@ When `ENVIRONMENT=production`:
 - Response is Pydantic-schema validated and evidence cross-validated
 - AI failures never fail the scan — findings display without AI insight
 - Maximum 20 LLM calls per scan (configurable)
+
+### Recommendation Engine
+
+- Deterministic rules first (dependency upgrade, container root, latest tag, etc.)
+- AI fallback for complex findings where rules don't apply
+- Each recommendation includes: what, why, change, uncertainty, risk, validation
+- Trust levels: SUPPORTED (deterministic), LIKELY (AI-backed), UNCERTAIN (insufficient evidence)
+
+### Re-validation (V2.6)
+
+- Advisory validation of recommendations against finding context
+- Checks: completeness, evidence existence, trust level consistency, scanner-specific logic, dangerous content
+- Pure function: no file system, network, or database access
+- Cannot modify security state
 
 ### Deterministic Risk Scoring
 
@@ -267,31 +306,32 @@ cyvrix/
 └── .github/workflows/       # CI/CD pipeline
 ```
 
-## Known Limitations (V1)
+## Known Limitations (V2)
 
 - **Single Redis instance** — no high-availability clustering
-- **No Docker image scanning** — V2 scope
-- **No SAST / secret scanning** — V2 scope
-- **No automated remediation** — V2 scope
+- **No SAST / secret scanning** — future scope
+- **No automated remediation** — recommendations are advisory only
 - **No push-triggered or webhook-based scanning** — manual scan only
 - **No multi-tenant organizations, teams, or RBAC** — single-user model
-- **npm and Python only** — Java, Go, etc. deferred to V2
-- **Live provider testing requires credentials** — GitHub OAuth, OSV, and LLM are mocked in E2E
+- **npm and Python only** — Java, Go, etc. deferred to future
+- **Live provider testing requires credentials** — GitHub, OSV, and LLM are mocked in E2E
+- **Container scanner is static analysis only** — no Docker image scanning
+- **Log analyzer uses deterministic patterns** — no AI-based anomaly detection
 
-## What V1 Does NOT Include
+## What V2 Does NOT Do
 
 | Feature | Status |
 |---------|--------|
-| Docker/container scanning | V2 roadmap |
-| SAST (Semgrep) | V2 roadmap |
-| Secret scanning (Gitleaks) | V2 roadmap |
-| Automated remediation / PRs | V2 roadmap |
-| Attack simulation | V2 roadmap |
-| Multi-agent orchestration | V2 roadmap |
-| Organization / team management | V2 roadmap |
-| RBAC / enterprise auth | V2 roadmap |
-| Public API platform | V2 roadmap |
-| Continuous monitoring | V2 roadmap |
+| Modify repositories or files | NEVER — advisory only |
+| Push code or create PRs | NEVER — advisory only |
+| Merge or deploy | NEVER — advisory only |
+| Execute arbitrary remediation | NEVER — advisory only |
+| SAST (Semgrep) | Future scope |
+| Secret scanning (Gitleaks) | Future scope |
+| Attack simulation | Future scope |
+| Multi-agent orchestration | Future scope |
+| Organization / team management | Future scope |
+| RBAC / enterprise auth | Future scope |
 
 ## License
 

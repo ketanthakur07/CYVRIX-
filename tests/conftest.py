@@ -16,15 +16,6 @@ TEST_DB_URL = "sqlite+aiosqlite:///test_cyvrix.db"
 
 
 @pytest.fixture(scope="session")
-def event_loop():
-    """Override the default event loop for the session."""
-    import asyncio
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture(scope="session")
 async def engine():
     """Create a session-scoped async SQLite engine."""
     eng = create_async_engine(TEST_DB_URL)

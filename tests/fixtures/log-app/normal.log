@@ -1,0 +1,5 @@
+2026-09-01T10:00:01Z INFO Application started
+2026-09-01T10:00:02Z INFO GET /api/health 200
+2026-09-01T10:00:03Z INFO GET /api/users 200
+2026-09-01T10:00:04Z INFO POST /api/data 201
+2026-09-01T10:00:05Z INFO Application shutdown

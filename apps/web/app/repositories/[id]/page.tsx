@@ -15,7 +15,7 @@ import {
   FileText,
   AlertCircle,
 } from "lucide-react";
-import { fetchRepository, fetchRepositoryScans, triggerScan } from "@/lib/api";
+import { fetchRepository, fetchRepositoryScans, triggerScan, triggerContainerScan, triggerLogAnalysis } from "@/lib/api";
 import { STATUS_COLORS, SEVERITY_COLORS } from "@/lib/types";
 import type { Scan as ScanType } from "@/lib/types";
 
@@ -44,6 +44,22 @@ export default function RepositoryPage() {
       queryClient.invalidateQueries({ queryKey: ["scans", id] });
       queryClient.invalidateQueries({ queryKey: ["repository", id] });
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+  });
+
+  const containerScanMutation = useMutation({
+    mutationFn: () => triggerContainerScan(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["scans", id] });
+      queryClient.invalidateQueries({ queryKey: ["repository", id] });
+    },
+  });
+
+  const logAnalysisMutation = useMutation({
+    mutationFn: () => triggerLogAnalysis(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["scans", id] });
+      queryClient.invalidateQueries({ queryKey: ["repository", id] });
     },
   });
 
@@ -124,7 +140,21 @@ export default function RepositoryPage() {
             ) : (
               <Scan className="h-4 w-4" />
             )}
-            {scanMutation.isPending ? "Starting..." : "Run Scan"}
+            {scanMutation.isPending ? "Starting..." : "Scan"}
+          </button>
+          <button
+            onClick={() => containerScanMutation.mutate()}
+            disabled={!isActive || containerScanMutation.isPending}
+            className="inline-flex items-center gap-2 px-3 py-2 border rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            🐳 Container
+          </button>
+          <button
+            onClick={() => logAnalysisMutation.mutate()}
+            disabled={!isActive || logAnalysisMutation.isPending}
+            className="inline-flex items-center gap-2 px-3 py-2 border rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            📋 Logs
           </button>
         </div>
       </div>

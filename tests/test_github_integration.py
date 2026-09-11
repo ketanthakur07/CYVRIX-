@@ -17,14 +17,6 @@ TEST_DB_URL = "sqlite+aiosqlite:///test_github_integration.db"
 
 
 @pytest.fixture(scope="module")
-def event_loop():
-    import asyncio
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture(scope="module")
 async def engine():
     eng = create_async_engine(TEST_DB_URL)
     async with eng.begin() as conn:

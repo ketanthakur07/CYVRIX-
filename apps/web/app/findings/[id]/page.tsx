@@ -16,6 +16,10 @@ import {
   SEVERITY_COLORS,
   RISK_LEVEL_COLORS,
   VERDICT_COLORS,
+  SOURCE_TYPE_COLORS,
+  SOURCE_TYPE_ICONS,
+  TRUST_LEVEL_COLORS,
+  VALIDATION_STATE_COLORS,
 } from "@/lib/types";
 
 export default function FindingPage() {
@@ -83,6 +87,11 @@ export default function FindingPage() {
               className={`px-3 py-1 rounded-lg text-sm font-medium border ${SEVERITY_COLORS[finding.severity] || SEVERITY_COLORS.UNKNOWN}`}
             >
               {finding.severity}
+            </span>
+            <span
+              className={`px-3 py-1 rounded-lg text-sm font-medium border ${SOURCE_TYPE_COLORS[finding.source_type] || SOURCE_TYPE_COLORS.DEPENDENCY}`}
+            >
+              {SOURCE_TYPE_ICONS[finding.source_type] || "📦"} {finding.source_type}
             </span>
             {finding.vulnerability_id && (
               <span className="text-sm font-mono text-gray-500">
@@ -281,6 +290,124 @@ export default function FindingPage() {
               </div>
             )}
           </div>
+
+          {/* Recommendation Section */}
+          {finding.recommendation && (
+            <div className="bg-white border rounded-lg p-6">
+              <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
+                <FileText className="h-5 w-5" />
+                Recommendation
+              </h2>
+
+              <div className="space-y-4">
+                {/* Trust level and validation state */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  {finding.recommendation.trust_level && (
+                    <span
+                      className={`px-3 py-1 rounded-lg text-sm font-medium ${TRUST_LEVEL_COLORS[finding.recommendation.trust_level] || TRUST_LEVEL_COLORS.UNCERTAIN}`}
+                    >
+                      Trust: {finding.recommendation.trust_level}
+                    </span>
+                  )}
+                  {finding.recommendation.validation_state && (
+                    <span
+                      className={`px-3 py-1 rounded-lg text-sm font-medium ${VALIDATION_STATE_COLORS[finding.recommendation.validation_state] || VALIDATION_STATE_COLORS.UNVERIFIED}`}
+                    >
+                      {finding.recommendation.validation_state.replace(/_/g, " ")}
+                    </span>
+                  )}
+                </div>
+
+                {/* What */}
+                {finding.recommendation.what && (
+                  <div>
+                    <p className="text-sm font-medium text-gray-700 mb-1">What</p>
+                    <p className="text-gray-600 whitespace-pre-wrap break-words">
+                      {finding.recommendation.what}
+                    </p>
+                  </div>
+                )}
+
+                {/* Why */}
+                {finding.recommendation.why && (
+                  <div>
+                    <p className="text-sm font-medium text-gray-700 mb-1">Why</p>
+                    <p className="text-gray-600 whitespace-pre-wrap break-words">
+                      {finding.recommendation.why}
+                    </p>
+                  </div>
+                )}
+
+                {/* Change */}
+                {finding.recommendation.change && (
+                  <div>
+                    <p className="text-sm font-medium text-gray-700 mb-1">Recommended Change</p>
+                    <p className="text-gray-600 whitespace-pre-wrap break-words">
+                      {finding.recommendation.change}
+                    </p>
+                  </div>
+                )}
+
+                {/* Risk */}
+                {finding.recommendation.risk && (
+                  <div>
+                    <p className="text-sm font-medium text-gray-700 mb-1">Risk</p>
+                    <p className="text-gray-600 whitespace-pre-wrap break-words">
+                      {finding.recommendation.risk}
+                    </p>
+                  </div>
+                )}
+
+                {/* Validation */}
+                {finding.recommendation.validation && (
+                  <div>
+                    <p className="text-sm font-medium text-gray-700 mb-1">How to Validate</p>
+                    <p className="text-gray-600 whitespace-pre-wrap break-words">
+                      {finding.recommendation.validation}
+                    </p>
+                  </div>
+                )}
+
+                {/* Uncertainty */}
+                {finding.recommendation.uncertainty && (
+                  <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+                    <p className="text-sm font-medium text-yellow-800 mb-1">Uncertainty</p>
+                    <p className="text-yellow-700 text-sm whitespace-pre-wrap break-words">
+                      {finding.recommendation.uncertainty}
+                    </p>
+                  </div>
+                )}
+
+                {/* Validation details */}
+                {finding.recommendation.validation_details && (
+                  <div className="bg-gray-50 border rounded-lg p-3">
+                    <p className="text-xs text-gray-500 mb-2">Validation Details</p>
+                    <p className="text-sm text-gray-600 mb-2">
+                      {finding.recommendation.validation_details.summary}
+                    </p>
+                    <div className="space-y-1">
+                      {finding.recommendation.validation_details.checks.map((check, i) => (
+                        <div key={i} className="flex items-center gap-2 text-xs">
+                          <span>{check.passed ? "✅" : "❌"}</span>
+                          <span className="font-medium">{check.check.replace(/_/g, " ")}</span>
+                          <span className="text-gray-500">— {check.reason}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Advisory notice */}
+                <div className="flex items-start gap-2 bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-700">
+                  <Info className="h-4 w-4 mt-0.5 shrink-0" />
+                  <span>
+                    Recommendations are advisory only. CYVRIX does not automatically
+                    modify repositories, push code, create PRs, or deploy changes.
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Sidebar */}

@@ -24,6 +24,12 @@ class Severity(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class SourceType(str, Enum):
+    DEPENDENCY = "DEPENDENCY"
+    CONTAINER = "CONTAINER"
+    LOG = "LOG"
+
+
 class FindingStatus(str, Enum):
     OPEN = "OPEN"
     CONFIRMED = "CONFIRMED"
@@ -192,6 +198,7 @@ class FindingResponse(BaseModel):
     repository_id: UUID
     fingerprint: str
     scanner: str
+    source_type: str = "DEPENDENCY"
     vulnerability_id: Optional[str] = None
     package_name: Optional[str] = None
     package_version: Optional[str] = None
@@ -207,6 +214,7 @@ class FindingResponse(BaseModel):
 class FindingDetailResponse(FindingResponse):
     investigation: Optional["InvestigationResponse"] = None
     risk_assessment: Optional[RiskAssessmentResponse] = None
+    recommendation: Optional["RecommendationResponse"] = None
 
 
 # ── Investigation ──────────────────────────────────────────────────
@@ -261,6 +269,42 @@ class AuditEventResponse(BaseModel):
     created_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
+
+
+class RecommendationResponse(BaseModel):
+    id: UUID
+    finding_id: UUID
+    status: str
+    trust_level: Optional[str] = None
+    title: str
+    description: Optional[str] = None
+    what: Optional[str] = None
+    why: Optional[str] = None
+    change: Optional[str] = None
+    uncertainty: Optional[str] = None
+    risk: Optional[str] = None
+    validation: Optional[str] = None
+    validation_state: Optional[str] = None
+    validation_details: Optional[dict] = None
+    validated_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class ReportResponse(BaseModel):
+    id: UUID
+    scan_id: UUID
+    repository_id: UUID
+    report_type: str
+    format: str
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class ReportDetailResponse(ReportResponse):
+    content: Optional[str] = None
 
 
 # Rebuild models with forward references
