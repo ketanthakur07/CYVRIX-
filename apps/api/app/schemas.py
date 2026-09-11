@@ -1,8 +1,10 @@
-from pydantic import BaseModel, Field, field_validator
-from typing import Optional
+from pydantic import BaseModel, Field, field_validator, ConfigDict
+from typing import Annotated, Literal, Optional, Union
 from uuid import UUID
 from datetime import datetime
 from enum import Enum
+
+from app.services.action_model import ActionType, ProposalStatus  # V3.1 allowlists
 
 
 # ── Enums ──────────────────────────────────────────────────────────
@@ -305,6 +307,141 @@ class ReportResponse(BaseModel):
 
 class ReportDetailResponse(ReportResponse):
     content: Optional[str] = None
+
+
+# ── V3.1 Action Proposals ──────────────────────────────────────────
+
+
+class UpdateDependencyVersionOp(BaseModel):
+    """Exact-pin dependency upgrade. No ranges, no new packages."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["UPDATE_DEPENDENCY_VERSION"]
+    file: str = Field(min_length=1, max_length=1000)
+    name: str = Field(min_length=1, max_length=200)
+    ecosystem: Literal["npm", "pypi"]
+    from_version: str = Field(min_length=1, max_length=100)
+    to_version: str = Field(min_length=1, max_length=100)
+
+
+class UpdateDockerfileInstructionOp(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["UPDATE_DOCKERFILE_INSTRUCTION"]
+    file: str = Field(min_length=1, max_length=1000)
+    line_no: int = Field(ge=1, le=100_000)
+    old_text: str = Field(min_length=1, max_length=5000)
+    new_text: str = Field(default="", max_length=5000)
+
+
+class AppendDockerfileInstructionOp(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["APPEND_DOCKERFILE_INSTRUCTION"]
+    file: str = Field(min_length=1, max_length=1000)
+    after_line: int = Field(ge=0, le=100_000)
+    instruction: str = Field(min_length=1, max_length=5000)
+
+
+class RemoveDockerfileInstructionOp(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["REMOVE_DOCKERFILE_INSTRUCTION"]
+    file: str = Field(min_length=1, max_length=1000)
+    line_no: int = Field(ge=1, le=100_000)
+
+
+class UpdateConfigurationValueOp(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["UPDATE_CONFIGURATION_VALUE"]
+    file: str = Field(min_length=1, max_length=1000)
+    key: str = Field(min_length=1, max_length=500)
+    value: str = Field(min_length=1, max_length=5000)
+
+
+class ReplaceTextOp(BaseModel):
+    """Documentation-only text replacement (DOCUMENTED_SECURITY_FIX)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["REPLACE_TEXT"]
+    file: str = Field(min_length=1, max_length=1000)
+    old_text: str = Field(min_length=1, max_length=5000)
+    new_text: str = Field(default="", max_length=5000)
+
+
+ActionOperation = Annotated[
+    Union[
+        UpdateDependencyVersionOp,
+        UpdateDockerfileInstructionOp,
+        AppendDockerfileInstructionOp,
+        RemoveDockerfileInstructionOp,
+        UpdateConfigurationValueOp,
+        ReplaceTextOp,
+    ],
+    Field(discriminator="type"),
+]
+
+
+class ActionProposalCreate(BaseModel):
+    """Create a proposal. Never executes anything.
+
+    Expiry, risk, validation state, ownership and policy inputs are all
+    server-derived; the client supplies only the action content.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    recommendation_id: UUID
+    action_type: ActionType
+    files: list[str] = Field(min_length=1, max_length=10)
+    operations: list[ActionOperation] = Field(min_length=1, max_length=50)
+    expected_diff: str = Field(default="", max_length=50_000)
+    target_branch: str = Field(min_length=1, max_length=255)
+    base_commit_sha: str = Field(min_length=40, max_length=40)
+    rationale: str = Field(default="", max_length=2000)
+
+
+class PolicyDecisionResponse(BaseModel):
+    decision: str
+    policy_version: str
+    reason_code: str
+    explanation: Optional[str] = None
+    matched_rule: str
+    approval_level: Optional[str] = None
+
+
+class ActionProposalResponse(BaseModel):
+    """Read-only proposal response. Contains no secrets by construction."""
+
+    id: UUID
+    finding_id: UUID
+    recommendation_id: UUID
+    repository_id: UUID
+    action_type: ActionType
+    status: ProposalStatus
+    base_commit_sha: str
+    target_branch: str
+    files: list[str]
+    operations: list[dict]
+    expected_diff: str
+    rationale: Optional[str] = None
+    risk_score: int
+    risk_level: str
+    recommendation_trust: Optional[str] = None
+    validation_state: Optional[str] = None
+    policy_version: str
+    policy_decision: str
+    policy_reason_code: str
+    policy_matched_rule: str
+    policy_explanation: Optional[str] = None
+    action_digest: str
+    expires_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
 
 
 # Rebuild models with forward references

@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     auth_rate_limit_per_minute: int = 30
     scan_rate_limit_per_hour: int = 10
 
+    # V3.1 action proposals (proposal creation only — no execution exists)
+    action_proposal_rate_limit_per_hour: int = 20
+
     # Scan limits
     max_repo_size_mb: int = 500
     scan_timeout_minutes: int = 10

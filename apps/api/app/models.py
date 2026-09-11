@@ -64,6 +64,7 @@ class Repository(Base):
     scans = relationship("Scan", back_populates="repository")
     findings = relationship("Finding", back_populates="repository")
     reports = relationship("Report", back_populates="repository")
+    action_proposals = relationship("ActionProposal", back_populates="repository")
 
 
 class Scan(Base):
@@ -129,6 +130,7 @@ class Finding(Base):
     investigation = relationship("Investigation", back_populates="finding", uselist=False)
     risk_assessment = relationship("RiskAssessment", back_populates="finding", uselist=False)
     recommendation = relationship("Recommendation", back_populates="finding", uselist=False)
+    action_proposals = relationship("ActionProposal", back_populates="finding")
 
 
 class Investigation(Base):
@@ -189,6 +191,7 @@ class Recommendation(Base):
     created_at = Column(DateTime(timezone=True), default=utcnow)
 
     finding = relationship("Finding", back_populates="recommendation")
+    action_proposals = relationship("ActionProposal", back_populates="recommendation")
 
 
 class Report(Base):
@@ -204,6 +207,69 @@ class Report(Base):
 
     scan = relationship("Scan")
     repository = relationship("Repository")
+
+
+class ActionProposal(Base):
+    """V3.1 — proposed (never executed) remediation action.
+
+    Security properties:
+    - Binds to repository + base_commit_sha + target_branch (no cross-repo drift)
+    - action_digest is the canonical SHA-256 of the action's executable
+      semantics; future approvals (V3.2) bind to this digest
+    - Policy decision fields are persisted with policy_version
+    - Identity is (recommendation_id, base_commit_sha, action_digest):
+      duplicate submissions return the existing proposal (idempotency)
+    - Inherits repository ownership: repository → installation → user
+    """
+
+    __tablename__ = "action_proposals"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    finding_id = Column(UUID(as_uuid=True), ForeignKey("findings.id"), nullable=False)
+    recommendation_id = Column(UUID(as_uuid=True), ForeignKey("recommendations.id"), nullable=False)
+    repository_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id"), nullable=False)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+
+    action_type = Column(Text, nullable=False)  # ActionType values only
+    status = Column(Text, nullable=False, default="PROPOSED")  # PROPOSED|POLICY_CHECKED|REJECTED|EXPIRED|STALE
+    base_commit_sha = Column(Text, nullable=False)
+    target_branch = Column(Text, nullable=False)
+    files = Column(JSONB, nullable=False)  # list[str], canonical relative paths
+    operations = Column(JSONB, nullable=False)  # list[dict], validated operation schemas
+    expected_diff = Column(Text, nullable=False)
+    rationale = Column(Text)
+    evidence = Column(JSONB)
+
+    # Risk/recommendation binding (snapshot at proposal time)
+    risk_score = Column(Integer, nullable=False)
+    risk_level = Column(Text, nullable=False)
+    recommendation_trust = Column(Text)
+    validation_state = Column(Text)
+
+    # Policy evaluation result (deterministic, versioned)
+    policy_version = Column(Text, nullable=False)
+    policy_decision = Column(Text, nullable=False)  # ALLOW|REQUIRE_APPROVAL|DENY
+    policy_reason_code = Column(Text, nullable=False)
+    policy_matched_rule = Column(Text, nullable=False)
+    policy_explanation = Column(Text)
+
+    action_digest = Column(Text, nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "recommendation_id", "base_commit_sha", "action_digest",
+            name="uq_proposal_identity",
+        ),
+        Index("ix_action_proposals_repo_status", "repository_id", "status"),
+        Index("ix_action_proposals_status_expiry", "status", "expires_at"),
+        Index("ix_action_proposals_digest", "action_digest"),
+    )
+
+    finding = relationship("Finding", back_populates="action_proposals")
+    recommendation = relationship("Recommendation", back_populates="action_proposals")
+    repository = relationship("Repository", back_populates="action_proposals")
 
 
 class AuditEvent(Base):

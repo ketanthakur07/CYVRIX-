@@ -21,6 +21,7 @@ from app.database import Base
 from app.models import (
     User, GithubInstallation, Repository, Scan,
     Dependency, Finding, Investigation, RiskAssessment, AuditEvent,
+    ActionProposal,
 )
 
 
@@ -471,3 +472,129 @@ class TestSourceTypePersistence:
             assert f.evidence["event_count"] == 15
 
 
+class TestActionProposalsSchema:
+    """V3.1: action_proposals table — schema, constraints, ownership chain."""
+
+    @pytest.mark.asyncio
+    async def test_action_proposals_table_exists(self, engine):
+        async with engine.connect() as conn:
+            tables = await conn.run_sync(
+                lambda sync_conn: inspect(sync_conn).get_table_names()
+            )
+        assert "action_proposals" in tables
+
+    @pytest.mark.asyncio
+    async def test_action_proposals_columns(self, engine):
+        expected = {
+            "id", "finding_id", "recommendation_id", "repository_id", "created_by",
+            "action_type", "status", "base_commit_sha", "target_branch",
+            "files", "operations", "expected_diff", "rationale", "evidence",
+            "risk_score", "risk_level", "recommendation_trust", "validation_state",
+            "policy_version", "policy_decision", "policy_reason_code",
+            "policy_matched_rule", "policy_explanation",
+            "action_digest", "expires_at", "created_at",
+        }
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(
+                lambda sync_conn: {c["name"] for c in inspect(sync_conn).get_columns("action_proposals")}
+            )
+        assert expected.issubset(columns), f"Missing: {expected - columns}"
+
+    @pytest.mark.asyncio
+    async def test_action_proposals_foreign_keys(self, engine):
+        from sqlalchemy import UniqueConstraint
+        fk_columns = [c.name for c in ActionProposal.__table__.columns if c.foreign_keys]
+        assert {"finding_id", "recommendation_id", "repository_id", "created_by"}.issubset(fk_columns)
+
+    @pytest.mark.asyncio
+    async def test_action_proposals_identity_unique_constraint(self, engine):
+        from sqlalchemy import UniqueConstraint
+        constraints = [
+            c for c in ActionProposal.__table__.constraints
+            if isinstance(c, UniqueConstraint) and c.name == "uq_proposal_identity"
+        ]
+        assert len(constraints) == 1
+        cols = {c.name for c in constraints[0].columns}
+        assert cols == {"recommendation_id", "base_commit_sha", "action_digest"}
+
+    @pytest.mark.asyncio
+    async def test_action_proposal_lifecycle_preserves_ownership(
+        self, engine
+    ):
+        """Full chain: user → installation → repository → scan → finding →
+        recommendation → risk → proposal, then ownership-reachable readback."""
+        session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        from app.models import ActionProposal as AP, Recommendation as Rec
+        from datetime import datetime, timedelta, timezone
+
+        async with session_factory() as session:
+            user = User(id=uuid4(), email="v31@test.com", github_id=40001)
+            session.add(user)
+            await session.flush()
+            inst = GithubInstallation(
+                id=uuid4(), user_id=user.id, installation_id=40010,
+                account_login="v31-org", account_type="Organization",
+            )
+            session.add(inst)
+            await session.flush()
+            repo = Repository(
+                id=uuid4(), installation_id=inst.id, github_repo_id=40011,
+                owner="v31-org", name="v31-repo", default_branch="main", is_active=True,
+            )
+            session.add(repo)
+            await session.flush()
+            scan = Scan(
+                id=uuid4(), repository_id=repo.id, status="COMPLETED",
+                trigger="manual", commit_sha="a" * 40,
+            )
+            session.add(scan)
+            await session.flush()
+            finding = Finding(
+                id=uuid4(), scan_id=scan.id, repository_id=repo.id,
+                fingerprint="v31-fp-001", scanner="dependency", source_type="DEPENDENCY",
+                title="Vuln in lodash", severity="HIGH", status="OPEN",
+                evidence={"manifest_path": "package.json"},
+            )
+            session.add(finding)
+            await session.flush()
+            rec = Rec(
+                id=uuid4(), finding_id=finding.id, status="COMPLETED",
+                trust_level="SUPPORTED", title="Upgrade lodash",
+                validation_state="VALIDATED",
+            )
+            session.add(rec)
+            session.add(AP(
+                id=uuid4(), finding_id=finding.id, recommendation_id=rec.id,
+                repository_id=repo.id, created_by=user.id,
+                action_type="DEPENDENCY_UPGRADE", status="POLICY_CHECKED",
+                base_commit_sha="a" * 40, target_branch="cyvrix/fix",
+                files=["package.json"],
+                operations=[{"type": "UPDATE_DEPENDENCY_VERSION",
+                             "file": "package.json", "name": "lodash",
+                             "ecosystem": "npm",
+                             "from_version": "4.17.19", "to_version": "4.17.21"}],
+                expected_diff="- 4.17.19\n+ 4.17.21",
+                risk_score=45, risk_level="MEDIUM",
+                policy_version="3.1", policy_decision="REQUIRE_APPROVAL",
+                policy_reason_code="MEDIUM_RISK_REQUIRES_APPROVAL",
+                policy_matched_rule="POL-027",
+                action_digest="d" * 64,
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+            ))
+            await session.commit()
+
+        async with session_factory() as session:
+            proposal = (await session.execute(
+                AP.__table__.select().where(AP.action_digest == "d" * 64)
+            )).first()
+            assert proposal is not None
+            # Ownership reachability: proposal → repository → installation → user
+            from sqlalchemy import select
+            from app.models import GithubInstallation as Inst
+            row = (await session.execute(
+                select(AP)
+                .join(Repository, Repository.id == AP.repository_id)
+                .join(Inst, Inst.id == Repository.installation_id)
+                .where(Inst.user_id == user.id)
+            )).scalars().all()
+            assert len(row) == 1
