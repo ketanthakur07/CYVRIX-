@@ -21,7 +21,7 @@ from app.database import Base
 from app.models import (
     User, GithubInstallation, Repository, Scan,
     Dependency, Finding, Investigation, RiskAssessment, AuditEvent,
-    ActionProposal,
+    ActionProposal, Approval, Recommendation,
 )
 
 
@@ -598,3 +598,270 @@ class TestActionProposalsSchema:
                 .where(Inst.user_id == user.id)
             )).scalars().all()
             assert len(row) == 1
+
+
+class TestApprovalsSchema:
+    """V3.2: approvals table — schema, constraints, ownership chain."""
+
+    @pytest.mark.asyncio
+    async def test_approvals_table_exists(self, engine):
+        async with engine.connect() as conn:
+            tables = await conn.run_sync(
+                lambda sync_conn: inspect(sync_conn).get_table_names()
+            )
+        assert "approvals" in tables
+
+    @pytest.mark.asyncio
+    async def test_approvals_columns(self, engine):
+        expected = {
+            "id", "action_proposal_id", "action_digest", "approver_user_id",
+            "second_approver_user_id", "approval_state", "approval_reason",
+            "policy_version", "policy_decision", "approval_level",
+            "approved_at", "expires_at", "authorization_token_hash",
+            "authorization_issued_at", "authorization_used_at", "created_at",
+        }
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(
+                lambda sync_conn: {c["name"] for c in inspect(sync_conn).get_columns("approvals")}
+            )
+        assert expected.issubset(columns), f"Missing: {expected - columns}"
+
+    @pytest.mark.asyncio
+    async def test_approvals_foreign_keys(self, engine):
+        from sqlalchemy import ForeignKey
+
+        fk_columns = [c.name for c in Approval.__table__.columns if c.foreign_keys]
+        assert {"action_proposal_id", "approver_user_id", "second_approver_user_id"}.issubset(fk_columns)
+
+    @pytest.mark.asyncio
+    async def test_approval_lifecycle_preserves_ownership(self, engine):
+        """Full chain: user → installation → repository → proposal → approval,
+        then ownership-reachable readback."""
+        session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        from datetime import datetime, timedelta, timezone
+        from uuid import uuid4 as uid
+
+        async with session_factory() as session:
+            user = User(id=uid(), email="v32@test.com", github_id=50001)
+            session.add(user)
+            await session.flush()
+            inst = GithubInstallation(
+                id=uid(), user_id=user.id, installation_id=50010,
+                account_login="v32-org", account_type="Organization",
+            )
+            session.add(inst)
+            await session.flush()
+            repo = Repository(
+                id=uid(), installation_id=inst.id, github_repo_id=50011,
+                owner="v32-org", name="v32-repo", default_branch="main", is_active=True,
+            )
+            session.add(repo)
+            await session.flush()
+            scan = Scan(
+                id=uid(), repository_id=repo.id, status="COMPLETED",
+                trigger="manual", commit_sha="b" * 40,
+            )
+            session.add(scan)
+            await session.flush()
+            finding = Finding(
+                id=uid(), scan_id=scan.id, repository_id=repo.id,
+                fingerprint="v32-fp-001", scanner="dependency", source_type="DEPENDENCY",
+                title="Vuln", severity="HIGH", status="OPEN", evidence={},
+            )
+            session.add(finding)
+            await session.flush()
+            rec = Recommendation(
+                id=uid(), finding_id=finding.id, status="COMPLETED",
+                trust_level="SUPPORTED", title="Upgrade", validation_state="VALIDATED",
+            )
+            session.add(rec)
+            await session.flush()
+            proposal = ActionProposal(
+                id=uid(), finding_id=finding.id, recommendation_id=rec.id,
+                repository_id=repo.id, created_by=user.id,
+                action_type="DEPENDENCY_UPGRADE", status="POLICY_CHECKED",
+                base_commit_sha="b" * 40, target_branch="cyvrix/fix",
+                files=["package.json"], operations=[{"type": "UPDATE_DEPENDENCY_VERSION"}],
+                expected_diff="diff", risk_score=45, risk_level="MEDIUM",
+                policy_version="3.1", policy_decision="REQUIRE_APPROVAL",
+                policy_reason_code="MEDIUM_RISK_REQUIRES_APPROVAL",
+                policy_matched_rule="POL-027", action_digest="e" * 64,
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+            )
+            session.add(proposal)
+            await session.flush()
+            session.add(Approval(
+                id=uid(), action_proposal_id=proposal.id,
+                action_digest=proposal.action_digest, approver_user_id=user.id,
+                approval_state="APPROVED", policy_version="3.1",
+                policy_decision="REQUIRE_APPROVAL",
+                approved_at=datetime.now(timezone.utc),
+                expires_at=datetime.now(timezone.utc) + timedelta(minutes=60),
+                authorization_token_hash="h" * 64,
+                authorization_issued_at=datetime.now(timezone.utc),
+            ))
+            await session.commit()
+
+        async with session_factory() as session:
+            from sqlalchemy import select as sel
+
+            rows = (await session.execute(
+                sel(Approval)
+                .join(ActionProposal, ActionProposal.id == Approval.action_proposal_id)
+                .join(Repository, Repository.id == ActionProposal.repository_id)
+                .join(GithubInstallation, GithubInstallation.id == Repository.installation_id)
+                .where(GithubInstallation.user_id == user.id)
+            )).scalars().all()
+            assert len(rows) == 1
+            assert rows[0].approval_state == "APPROVED"
+            assert rows[0].authorization_token_hash == "h" * 64
+
+
+class TestExecutionAuthorizationsSchema:
+    """V3.3: execution_authorizations + system_controls — schema, FKs,
+    ownership chain, hash-only material."""
+
+    @pytest.mark.asyncio
+    async def test_execution_authorizations_table_exists(self, engine):
+        async with engine.connect() as conn:
+            tables = await conn.run_sync(
+                lambda sync_conn: inspect(sync_conn).get_table_names()
+            )
+        assert "execution_authorizations" in tables
+        assert "system_controls" in tables
+
+    @pytest.mark.asyncio
+    async def test_execution_authorizations_columns(self, engine):
+        expected = {
+            "id", "action_proposal_id", "approval_id", "action_digest",
+            "repository_id", "base_commit_sha", "target_branch",
+            "policy_version", "policy_decision", "authorization_state",
+            "contract", "contract_digest", "contract_version",
+            "authorized_by_user_id", "consumed_at", "created_at",
+        }
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(
+                lambda sync_conn: {
+                    c["name"]
+                    for c in inspect(sync_conn).get_columns("execution_authorizations")
+                }
+            )
+        assert expected.issubset(columns), f"Missing: {expected - columns}"
+
+    @pytest.mark.asyncio
+    async def test_execution_authorizations_foreign_keys(self, engine):
+        from app.models import ExecutionAuthorization as EA
+
+        fk_columns = [c.name for c in EA.__table__.columns if c.foreign_keys]
+        assert {
+            "action_proposal_id", "approval_id", "repository_id",
+            "authorized_by_user_id",
+        }.issubset(fk_columns)
+
+    @pytest.mark.asyncio
+    async def test_authorization_lifecycle_preserves_ownership(self, engine):
+        """Full chain: user → installation → repository → proposal →
+        approval → execution authorization, ownership-reachable readback;
+        no plaintext token material anywhere on the authorization row."""
+        session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        from datetime import datetime, timedelta, timezone
+        from uuid import uuid4 as uid
+
+        from app.models import ExecutionAuthorization, SystemControl
+
+        async with session_factory() as session:
+            user = User(id=uid(), email="v33@test.com", github_id=60001)
+            session.add(user)
+            await session.flush()
+            inst = GithubInstallation(
+                id=uid(), user_id=user.id, installation_id=60010,
+                account_login="v33-org", account_type="Organization",
+            )
+            session.add(inst)
+            await session.flush()
+            repo = Repository(
+                id=uid(), installation_id=inst.id, github_repo_id=60011,
+                owner="v33-org", name="v33-repo", default_branch="main",
+                is_active=True,
+            )
+            session.add(repo)
+            await session.flush()
+            scan = Scan(
+                id=uid(), repository_id=repo.id, status="COMPLETED",
+                trigger="manual", commit_sha="c" * 40,
+            )
+            session.add(scan)
+            await session.flush()
+            finding = Finding(
+                id=uid(), scan_id=scan.id, repository_id=repo.id,
+                fingerprint="v33-fp-001", scanner="dependency",
+                source_type="DEPENDENCY", title="Vuln", severity="HIGH",
+                status="OPEN", evidence={},
+            )
+            session.add(finding)
+            await session.flush()
+            rec = Recommendation(
+                id=uid(), finding_id=finding.id, status="COMPLETED",
+                trust_level="SUPPORTED", title="Upgrade", validation_state="VALIDATED",
+            )
+            session.add(rec)
+            await session.flush()
+            proposal = ActionProposal(
+                id=uid(), finding_id=finding.id, recommendation_id=rec.id,
+                repository_id=repo.id, created_by=user.id,
+                action_type="DEPENDENCY_UPGRADE", status="APPROVED",
+                base_commit_sha="c" * 40, target_branch="cyvrix/fix",
+                files=["package.json"],
+                operations=[{"type": "UPDATE_DEPENDENCY_VERSION"}],
+                expected_diff="diff", risk_score=45, risk_level="MEDIUM",
+                policy_version="3.1", policy_decision="REQUIRE_APPROVAL",
+                policy_reason_code="MEDIUM_RISK_REQUIRES_APPROVAL",
+                policy_matched_rule="POL-027", action_digest="d" * 64,
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+            )
+            session.add(proposal)
+            await session.flush()
+            approval = Approval(
+                id=uid(), action_proposal_id=proposal.id,
+                action_digest=proposal.action_digest, approver_user_id=user.id,
+                approval_state="APPROVED", policy_version="3.1",
+                policy_decision="REQUIRE_APPROVAL",
+                approved_at=datetime.now(timezone.utc),
+                expires_at=datetime.now(timezone.utc) + timedelta(minutes=60),
+                authorization_token_hash="h" * 64,
+                authorization_issued_at=datetime.now(timezone.utc),
+            )
+            session.add(approval)
+            await session.flush()
+            session.add(ExecutionAuthorization(
+                id=uid(), action_proposal_id=proposal.id, approval_id=approval.id,
+                action_digest=proposal.action_digest, repository_id=repo.id,
+                base_commit_sha="c" * 40, target_branch="cyvrix/fix",
+                policy_version="3.1", policy_decision="REQUIRE_APPROVAL",
+                authorization_state="AUTHORIZED",
+                contract={"action_digest": proposal.action_digest,
+                          "allowed_files": ["package.json"]},
+                contract_digest="e" * 64, contract_version="1",
+                authorized_by_user_id=user.id,
+            ))
+            session.add(SystemControl(key="execution_disabled", value="false"))
+            await session.commit()
+
+        async with session_factory() as session:
+            from sqlalchemy import select as sel
+
+            from app.models import ExecutionAuthorization as EA
+
+            rows = (await session.execute(
+                sel(EA)
+                .join(ActionProposal, ActionProposal.id == EA.action_proposal_id)
+                .join(Repository, Repository.id == ActionProposal.repository_id)
+                .join(GithubInstallation, GithubInstallation.id == Repository.installation_id)
+                .where(GithubInstallation.user_id == user.id)
+            )).scalars().all()
+            assert len(rows) == 1
+            assert rows[0].authorization_state == "AUTHORIZED"
+            # No token/credential material on the authorization record
+            row_blob = str(rows[0].contract) + rows[0].contract_digest
+            assert "authorization_token_hash" not in row_blob
+            assert ("h" * 64) not in row_blob

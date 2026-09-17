@@ -97,7 +97,19 @@ def extract_digest_content(content: dict) -> dict:
 def canonical_json_bytes(content: dict) -> bytes:
     """Deterministic serialization of digest-relevant content."""
     extracted = extract_digest_content(content)
-    canonical = _canonicalize(extracted)
+    return generic_canonical_bytes(extracted)
+
+
+def generic_canonical_bytes(content: dict) -> bytes:
+    """Deterministic serialization of an arbitrary JSON-like dict.
+
+    Same canonicalization rules as the action digest (sorted keys, compact
+    separators, NFC strings, UTF-8) but WITHOUT the action-specific field
+    extraction. Used by other digest domains (e.g. the V3.3 execution
+    authorization contract) that must follow the identical canonical form.
+    Pure: no I/O, no clock, no randomness.
+    """
+    canonical = _canonicalize(content)
     return json.dumps(
         canonical,
         sort_keys=True,

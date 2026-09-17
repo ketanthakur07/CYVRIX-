@@ -446,3 +446,175 @@ class ActionProposalResponse(BaseModel):
 
 # Rebuild models with forward references
 FindingDetailResponse.model_rebuild()
+
+
+# ── V3.2 Action Approvals (authorization data only — no execution) ──
+
+
+class ApprovalCreate(BaseModel):
+    """Approve (or reject) an action proposal.
+
+    The client supplies only human metadata. The action digest is
+    recalculated server-side; expiry, policy, and eligibility are all
+    server-derived. Never executes anything.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(default="", max_length=2000)
+    # Second principal identity for HIGH/CRITICAL risk proposals.
+    # The SERVER verifies step-up freshness for both principals.
+    second_approver_user_id: Optional[UUID] = None
+
+
+class RejectionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(default="", max_length=2000)
+
+
+class RevocationCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(default="", max_length=2000)
+
+
+class TokenConsumeRequest(BaseModel):
+    """Present a one-time authorization token. Non-executing verification
+    endpoint (executor consumes authorization through this in V3.4+)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=8, max_length=256)
+
+
+class ApprovalResponse(BaseModel):
+    """Approval metadata. NEVER contains token material — the plaintext
+    one-time token is returned exactly once, only in ApprovalIssuedResponse."""
+
+    id: UUID
+    action_proposal_id: UUID
+    action_digest: str
+    approver_user_id: UUID
+    second_approver_user_id: Optional[UUID] = None
+    approval_state: str
+    approval_reason: Optional[str] = None
+    policy_version: str
+    policy_decision: str
+    approval_level: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    authorization_issued_at: Optional[datetime] = None
+    authorization_used_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class ApprovalIssuedResponse(ApprovalResponse):
+    """One-time issuance response: the ONLY place the plaintext token exists."""
+
+    authorization_token: str
+
+
+# ── V3.3 Execution authorization (the final deterministic gate — still no execution) ──
+
+
+class ExecutionAuthorizationCreate(BaseModel):
+    """Request to authorize execution of an approved action.
+
+    The client supplies NOTHING security-relevant: no digest, no policy
+    decision, no risk, no approval state, no authorized=true. Every
+    security value is loaded and recomputed server-side (§31).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(default="", max_length=2000)
+
+
+class ExecutionAuthorizationResponse(BaseModel):
+    """Authorization metadata. Non-executable: contains authorization
+    identity and scope bindings, never commands, credentials, URLs, or
+    secrets. The one-time approval token is NEVER present here."""
+
+    id: UUID
+    action_proposal_id: UUID
+    approval_id: UUID
+    action_digest: str
+    repository_id: UUID
+    base_commit_sha: str
+    target_branch: str
+    policy_version: str
+    policy_decision: str
+    authorization_state: str
+    contract: dict
+    contract_digest: str
+    contract_version: str
+    authorized_by_user_id: UUID
+    consumed_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class ExecutionAuthorizationConsumeRequest(BaseModel):
+    """Present the one-time approval token to consume the authorization.
+    Atomic, single-use; exactly one concurrent consumer succeeds."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=8, max_length=256)
+
+
+class ExecutionAuthorizationRevokeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(default="", max_length=2000)
+
+
+# ── V3.4 — sandboxed execution ───────────────────────────────────────
+
+
+class ExecutionAdmissionRequest(BaseModel):
+    """Internal executor admission request (§87/§88).
+
+    NOT user-facing: service identity only. The client supplies nothing
+    security-relevant — the run binds to the authorization record named
+    by execution_authorization_id, verified server-side in the admission
+    transaction. Forged authorized/decision/state fields are rejected
+    (extra="forbid"), never honored.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    execution_authorization_id: UUID
+    token: str = Field(min_length=8, max_length=256)  # the one-time approval token
+
+
+class ExecutionRunResponse(BaseModel):
+    """Bounded execution-run metadata (§48). No secrets, no workspace
+    content, no credentials, no unbounded logs. Status words are
+    ADMISSION_PENDING/EXECUTING/RESULT_READY/COMPLETED/FAILED/
+    CLEANUP_FAILED — never VERIFIED/FIXED/SAFE (V3.6 does not exist)."""
+
+    id: UUID
+    execution_authorization_id: UUID
+    action_proposal_id: UUID
+    repository_id: UUID
+    action_digest: str
+    contract_digest: str
+    run_state: str
+    fail_reason_code: Optional[str] = None
+    fail_detail: Optional[str] = None
+    execution_profile: str
+    resource_profile: dict
+    cleanup_status: str
+    cleanup_detail: Optional[str] = None
+    result: Optional[dict] = None
+    diff_digest: Optional[str] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}

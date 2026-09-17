@@ -11,7 +11,7 @@ import {
   FileText,
   Info,
 } from "lucide-react";
-import { fetchFinding } from "@/lib/api";
+import { fetchFinding, fetchActionProposals } from "@/lib/api";
 import {
   SEVERITY_COLORS,
   RISK_LEVEL_COLORS,
@@ -21,6 +21,48 @@ import {
   TRUST_LEVEL_COLORS,
   VALIDATION_STATE_COLORS,
 } from "@/lib/types";
+
+/**
+ * V3.2 — proposals card. Read-only list + link to the approval screen.
+ * Proposal creation lives with recommendations (API); this card never
+ * renders approval controls. All content is plain text (XSS-safe).
+ */
+function ProposalsCard({ findingId }: { findingId: string }) {
+  const { data: proposals } = useQuery({
+    queryKey: ["action-proposals", findingId],
+    queryFn: () => fetchActionProposals(findingId),
+  });
+
+  if (!proposals || proposals.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+      <p className="text-xs font-medium text-gray-500 mb-2">
+        Action proposals ({proposals.length}) — review &amp; approve
+      </p>
+      <div className="space-y-2">
+        {proposals.map((p) => (
+          <div key={p.id} className="flex items-center justify-between gap-2 text-sm">
+            <span className="font-mono text-xs text-gray-700 break-all">
+              {p.action_type} · {p.files.join(", ")}
+            </span>
+            <span className="flex items-center gap-2 shrink-0">
+              <span className="text-xs text-gray-500">{p.status}</span>
+              <Link
+                href={`/actions/${p.id}`}
+                className="text-blue-600 hover:text-blue-800 text-xs font-medium"
+              >
+                Review →
+              </Link>
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export default function FindingPage() {
   const params = useParams();
@@ -405,6 +447,9 @@ export default function FindingPage() {
                     modify repositories, push code, create PRs, or deploy changes.
                   </span>
                 </div>
+
+                {/* V3.1/V3.2 action proposals for this finding */}
+                <ProposalsCard findingId={finding.id} />
               </div>
             </div>
           )}

@@ -1,7 +1,8 @@
 # CYVRIX V3 — Execution Model
 
-Status: DESIGN (no implementation)
+Status: PARTIAL IMPLEMENTATION — **V3.4 IMPLEMENTED: sandboxed LOCAL structured execution** (container-per-execution, non-root, network-off, resource-bounded, host-side scope verification). V3.4 does NOT yet provide: GitHub push, automatic pull-request creation, production repository mutation, the final verification/rollback system (V3.6/V3.7), or the V3.8 hash-chained immutable audit architecture. Push/PR/rollback steps below remain DESIGN.
 Companion: `v3-architecture.md`, `v3-security-model.md`, `v3-action-policy.md`, `v3-threat-model.md`
+Implementation: `apps/api/app/services/execution_service.py` + `apps/api/app/services/sandbox.py` + `apps/api/app/services/workspace.py` + `apps/api/cyvrix_executor/`
 
 ---
 
@@ -11,9 +12,14 @@ The executor is a deterministic application of an approved, digest-bound operati
 
 ```
 APPROVED proposal (digest D, base SHA S)
+  → execution authorization (V3.3): POST /authorize re-validates digest,
+    policy, freshness, kill switch → records immutable contract
   → worker claims job (advisory lock on repository)
-  → re-checks: kill switch, policy, approval validity, repo state, digest
-  → mints scoped installation token
+  → consumes one-time authorization (V3.3): POST …/consume atomically
+    CONSUMES the contract + approval → returns the machine-readable
+    contract ONLY (no credentials, no session, no commands)
+  → re-checks: contract_digest, kill switch, repo state, digest
+  → mints scoped installation token (external authorizer target: Threat-G)
   → provisions sandbox at commit S
   → executor applies structured operations
   → verification pipeline
@@ -21,6 +27,11 @@ APPROVED proposal (digest D, base SHA S)
   → post-action security validation (V2 scanners before/after)
   → SUCCEEDED | FAILED → ROLLBACK
 ```
+
+The authorization contract consumed here is specified in
+`docs/v3-execution-authorization.md` (ADR-009): immutable, digest-bound,
+non-executable. V3.3 itself implements NO executor — the steps below this
+line remain design.
 
 ---
 

@@ -270,6 +270,7 @@ async def _get_owned_proposal(
 async def list_action_proposals(
     status: str = None,
     action_type: str = None,
+    finding_id: str = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -284,6 +285,8 @@ async def list_action_proposals(
         query = query.where(ActionProposal.status == status.upper())
     if action_type:
         query = query.where(ActionProposal.action_type == action_type.upper())
+    if finding_id:
+        query = query.where(ActionProposal.finding_id == finding_id)
     query = query.order_by(ActionProposal.created_at.desc()).limit(100)
 
     result = await db.execute(query)

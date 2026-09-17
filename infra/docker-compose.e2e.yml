@@ -59,7 +59,7 @@ services:
       DATABASE_URL_SYNC: postgresql://cyvrix_test:cyvrix_test_password@postgres:5432/cyvrix_test
       REDIS_URL: redis://redis:6379/0
       SECRET_KEY: test-secret-key-for-integration-only-not-for-production-32chars!
-      ENVIRONMENT: test
+      ENVIRONMENT: development
       APP_URL: http://localhost:3001
       API_URL: http://localhost:8001
       GITHUB_CLIENT_ID: test-github-client-id
@@ -91,7 +91,7 @@ services:
       DATABASE_URL_SYNC: postgresql://cyvrix_test:cyvrix_test_password@postgres:5432/cyvrix_test
       REDIS_URL: redis://redis:6379/0
       SECRET_KEY: test-secret-key-for-integration-only-not-for-production-32chars!
-      ENVIRONMENT: test
+      ENVIRONMENT: development
       GITHUB_APP_ID: "12345"
       GITHUB_API_BASE: http://mock-providers:8100
       GITHUB_CLONE_URL_BASE: mock-providers:8100
@@ -112,6 +112,10 @@ services:
     build:
       context: ..
       dockerfile: apps/web/Dockerfile
+      args:
+        # Next.js bakes rewrites into the standalone build, so the backend
+        # URL must be provided at BUILD time (runtime env is not enough).
+        API_BACKEND_URL: http://api:8000
     ports:
       - "3001:3000"
     environment:

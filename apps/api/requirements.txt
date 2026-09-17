@@ -12,3 +12,4 @@ python-jose[cryptography]==3.3.0
 PyJWT==2.9.0
 cryptography==43.0.0
 python-multipart==0.0.12
+docker==7.1.0

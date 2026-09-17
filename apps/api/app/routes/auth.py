@@ -8,6 +8,7 @@ Handles:
 """
 import logging
 import secrets
+import time
 from urllib.parse import urlencode
 
 import httpx
@@ -101,7 +102,10 @@ async def github_callback(
     import redis.asyncio as aioredis
     r = aioredis.from_url(settings.redis_url, decode_responses=True)
     stored_state = await r.get(f"github_oauth_state:{state}")
+    # Step-up round-trips carry a purpose marker: "<user_id>|<return_path>"
+    stepup_marker = await r.get(f"stepup_oauth:{state}")
     await r.delete(f"github_oauth_state:{state}")
+    await r.delete(f"stepup_oauth:{state}")
     await r.aclose()
 
     if not stored_state:
@@ -193,6 +197,37 @@ async def github_callback(
         metadata={"login": login, "github_id": str(github_id)},
     )
 
+    # Step-up completion: GitHub has re-verified this user. Record the
+    # fresh step-up marker (bounded lifetime) and return to the caller.
+    if stepup_marker:
+        marker_user, _, marker_path = stepup_marker.partition("|")
+        if marker_user == str(user.id):
+            if not marker_path.startswith("/") or marker_path.startswith("//") or len(marker_path) > 200:
+                marker_path = "/dashboard"
+            import redis.asyncio as aioredis
+
+            r2 = aioredis.from_url(settings.redis_url, decode_responses=True)
+            try:
+                await r2.setex(
+                    f"stepup:{user.id}",
+                    settings.step_up_max_age_minutes * 60,
+                    str(int(time.time())),
+                )
+            finally:
+                await r2.aclose()
+            logger.info("step_up_completed user_id=%s", user.id)
+            response = RedirectResponse(url=f"{settings.app_url}{marker_path}?step_up=ok")
+            response.set_cookie(
+                key=settings.session_cookie_name,
+                value=cookie_value,
+                max_age=settings.session_ttl_seconds,
+                httponly=True,
+                secure=settings.cookie_secure,
+                samesite=settings.cookie_same_site,
+                path="/",
+            )
+            return response
+
     # Redirect to frontend with session cookie
     response = RedirectResponse(url=f"{settings.app_url}/dashboard")
     response.set_cookie(
@@ -207,6 +242,49 @@ async def github_callback(
 
     logger.info("login_success user_id=%s github_login=%s", user.id, login)
     return response
+
+
+@router.get("/step-up/login")
+async def step_up_login(
+    request: Request,
+    state: str = "",
+    return_path: str = "/dashboard",
+    user: User = Depends(get_current_user),
+):
+    """Begin a GitHub re-authentication round-trip for approval step-up.
+
+    Consumes the one-time state issued by POST /api/actions/step-up and
+    redirects to GitHub. The step-up marker is written ONLY after GitHub
+    verifies the user again in the callback — this is real re-auth,
+    not a simulated prompt.
+    """
+    if not return_path.startswith("/") or return_path.startswith("//") or len(return_path) > 200:
+        return_path = "/dashboard"
+
+    import redis.asyncio as aioredis
+
+    r = aioredis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        stored = await r.get(f"stepup_state:{state}")
+        await r.delete(f"stepup_state:{state}")
+        if not stored or stored != str(user.id):
+            return RedirectResponse(url=f"{settings.app_url}{return_path}?step_up=invalid_state")
+
+        oauth_state = secrets.token_urlsafe(32)
+        await r.setex(f"github_oauth_state:{oauth_state}", 600, "pending")
+        # Mark this OAuth round-trip as a step-up for this user (one-time)
+        await r.setex(
+            f"stepup_oauth:{oauth_state}", 600, f"{user.id}|{return_path}"
+        )
+    finally:
+        await r.aclose()
+
+    params = {
+        "client_id": settings.github_client_id,
+        "scope": "read:user",
+        "state": oauth_state,
+    }
+    return RedirectResponse(url=f"{GITHUB_AUTHORIZE_URL}?{urlencode(params)}")
 
 
 @router.post("/logout")

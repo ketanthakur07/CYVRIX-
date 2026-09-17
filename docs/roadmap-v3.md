@@ -12,8 +12,8 @@ Each phase ships with its tests before the next begins. Nothing in any phase gra
 |---|---|---|
 | **V3.1** | ActionProposal model + deterministic policy engine | Schema tests, decision-table unit tests, default-deny test, IDOR tests |
 | **V3.2** | Approval workflow (records, expiry, step-up auth, self-approval policy) | Approval unit + security tests (unauthorized approver, duplicate, expiry) |
-| **V3.3** | Digest (canonical serialization) + one-time authorization tokens | Digest immutability tests, replay tests, golden path 4 regression |
-| **V3.4** | Sandbox infrastructure (container-per-execution, limits, teardown) | Adversarial confinement tests, egress probe test, resource-limit tests |
+| **V3.3** | Digest (canonical serialization) + one-time authorization tokens — **IMPLEMENTED as the execution-authorization gate (ADR-009, docs/v3-execution-authorization.md): immutable digest-bound contract, fail-closed kill switch, one-time atomic consumption, genuine race tests; still zero execution capability** | Digest immutability tests, replay tests, golden path 4 regression — verified: 74 unit/API tests + 63×3 concurrent race tests on real PostgreSQL + migration 006 fresh & in-place |
+| **V3.4** | Sandbox infrastructure (container-per-execution, limits, teardown) — **IMPLEMENTED as sandboxed LOCAL structured execution (docs/v3-execution-model.md, docs/v3-sandbox.md): container-per-run, non-root uid 10001, cap_drop ALL, no-new-privileges, pinned seccomp, network_mode none, read-only rootfs, frozen resource limits, credential-free sandbox, host-side BEFORE/AFTER scope verification, atomic exactly-once admission consuming the V3.3 authorization; NO push, NO pull requests, NO rollback — those remain V3.5–V3.7** | Adversarial confinement tests, egress probe test, resource-limit tests — verified: engine/API unit suites + SQLite race suites green; real-container suite (`RUN_SANDBOX_TESTS=1`) and real-PG race suite (`RUN_INTEGRATION_TESTS=1`) are the environment-gated release gates |
 | **V3.5** | Controlled git operations (structured commit/push/PR, hooks neutralized) | Git safety tests, argv-array/injection tests, stale-state (golden path 5) |
 | **V3.6** | Verification pipeline (per-type checks, before/after comparison) | Verification-failure tests, regression-gate tests (fix-one-break-three) |
 | **V3.7** | Rollback (snapshot restore, revert changeset, ROLLBACK_FAILED handling) | Rollback tests incl. rollback-of-rollback, failure golden path |
@@ -117,7 +117,7 @@ CI ordering: unit+security gate every PR; integration on merge; adversarial suit
 
 ## 5. Open Items Carried Into Implementation
 
-1. Threat-G hardening: external authorizer service signing per-action push credentials (target ≤ V3.4).
+1. Threat-G hardening: external authorizer service signing per-action push credentials (target ≤ V3.4). V3.3 shrank the surface: authorization is now a separately auditable, digest-bound artifact consumed through one audited gate, but the decision still lives in the worker's trust domain until the external authorizer lands.
 2. Role model details (owner/approver) and second-principal UX for org installations.
 3. Webhook intake (currently unused `GITHUB_WEBHOOK_SECRET`) for push-based stale-state detection.
 4. Build-validation profile for DOCKERFILE_UPDATE (builds are costly and risky; deferred behind explicit enablement).

@@ -250,3 +250,77 @@ export async function fetchReportsByScan(
 ): Promise<Report[]> {
   return apiFetch<Report[]>(`/reports/scan/${scanId}`);
 }
+
+// ── V3.1/V3.2 Action Proposals & Approvals ──────────────────────────
+
+import type { ActionProposal, Approval } from "./types";
+
+/** Get one action proposal (read-only; ownership enforced server-side) */
+export async function fetchActionProposal(id: string): Promise<ActionProposal> {
+  return apiFetch<ActionProposal>(`/actions/${id}`);
+}
+
+/** List action proposals, optionally filtered by finding */
+export async function fetchActionProposals(
+  findingId?: string
+): Promise<ActionProposal[]> {
+  const qs = findingId ? `?finding_id=${encodeURIComponent(findingId)}` : "";
+  return apiFetch<ActionProposal[]>(`/actions${qs}`);
+}
+
+/** Get the current approval for a proposal (404 when none exists) */
+export async function fetchActionApproval(id: string): Promise<Approval> {
+  return apiFetch<Approval>(`/actions/${id}/approval`);
+}
+
+/** Begin step-up authentication (fresh GitHub re-auth round-trip) */
+export async function beginStepUp(): Promise<{ state: string; redirect: string }> {
+  return apiFetch("/actions/step-up", { method: "POST" });
+}
+
+/** Check whether the current session has a fresh step-up approval */
+export async function fetchStepUpStatus(): Promise<{
+  step_up_valid: boolean;
+  max_age_minutes?: number;
+}> {
+  return apiFetch("/actions/step-up/status");
+}
+
+/**
+ * Approve an action proposal. Authorization data only — the server
+ * re-verifies digest, policy, eligibility, and step-up. The one-time
+ * authorization token (when a new approval is issued) is returned
+ * exactly once and must be stored by the user immediately.
+ */
+export async function approveProposal(
+  proposalId: string,
+  body: { reason?: string; second_approver_user_id?: string }
+): Promise<Approval & { authorization_token: string }> {
+  return apiFetch(`/actions/${proposalId}/approve`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** Reject a pending approval request (state transition only) */
+export async function rejectProposal(
+  proposalId: string,
+  body: { reason?: string }
+): Promise<Approval> {
+  return apiFetch(`/actions/${proposalId}/reject`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** Revoke an APPROVED approval (state transition only, no resurrection) */
+export async function revokeApproval(
+  proposalId: string,
+  approvalId: string,
+  body: { reason?: string }
+): Promise<Approval> {
+  return apiFetch(`/actions/${proposalId}/approval/${approvalId}/revoke`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}

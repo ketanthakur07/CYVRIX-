@@ -63,13 +63,15 @@ class OperationType(str, Enum):
 
 
 class ProposalStatus(str, Enum):
-    """V3.1 statuses. APPROVED/AUTHORIZED/EXECUTING/... arrive in V3.2+."""
+    """V3.1 statuses. V3.2 adds APPROVED (approval recorded — still NOT
+    executed; EXECUTING/AUTHORIZED/... arrive with the executor phases)."""
 
     PROPOSED = "PROPOSED"
     POLICY_CHECKED = "POLICY_CHECKED"
     REJECTED = "REJECTED"
     EXPIRED = "EXPIRED"
     STALE = "STALE"
+    APPROVED = "APPROVED"
 
 
 # Operations allowed per action type

@@ -1,6 +1,6 @@
 # CYVRIX V3 — Architecture Specification
 
-Status: DESIGN (no implementation). **V3.1 (action model + policy engine) is IMPLEMENTED — see docs/v3-action-model.md.** All other phases remain design-only.
+Status: PARTIAL IMPLEMENTATION. **V3.1 (action model + policy engine) is IMPLEMENTED — see docs/v3-action-model.md. V3.2 (human approval) is IMPLEMENTED — see docs/v3-approval-model.md. V3.3 (execution authorization gate) is IMPLEMENTED — see docs/v3-execution-authorization.md. V3.4 (sandboxed LOCAL structured execution: container-per-execution, non-root, network-off, bounded, host-side scope verification; NO push, NO pull requests, NO rollback) is IMPLEMENTED — see docs/v3-execution-model.md and the V3.4 sections of docs/v3-security-model.md.** Later phases (git operations/push, verification V3.6, rollback V3.7, hash-chained audit V3.8) remain design-only.
 Version: 3.0.0-draft1
 Supersedes: nothing (extends V2, documented in `docs/v2-architecture.md`)
 Companion docs: `v3-security-model.md`, `v3-action-policy.md`, `v3-execution-model.md`, `v3-threat-model.md`, `roadmap-v3.md`
@@ -323,6 +323,7 @@ All: same ownership-chain authorization as V2 (404 for cross-tenant), strict inp
 - Idempotency key = proposal `digest`; unique active-execution constraint per proposal; per-repository execution lock (DB advisory lock) prevents concurrent conflicting remediations; duplicate API calls return the existing record (409 otherwise).
 - Rate limits: proposals ≤ 20/h/user, approvals ≤ 30/h/user, executions ≤ 10/h/repo, verification retries ≤ 2. Compromised account cannot flood remediations (security model §8).
 - Blast radius: one action → one repository → one branch → limited files (≤10) → one approved changeset. No batch modifications in V3.0.
+- **V3.2 (implemented):** approval-layer races are serialized end-to-end — every approval decision (approve/reject/revoke/consume) takes the proposal row lock, re-checks decision inputs inside the lock, and recovers from commit conflicts by surfacing the winner's state; the `uq_approvals_live` partial unique index is the final DB backstop. Deterministic outcomes are documented in `v3-approval-model.md` §7 and verified by genuine simultaneous-request tests (`tests/test_approval_races.py`, real PostgreSQL, ≥10 repetitions per race class).
 
 ---
 
@@ -358,6 +359,8 @@ The 15 invariants in `docs/v3-security-model.md` §5 are binding requirements of
 ## 20. Implementation Phases
 
 V3.1 Action model + policy engine → V3.2 Approval workflow → V3.3 Digest + authorization → V3.4 Sandbox infrastructure → V3.5 Controlled git operations → V3.6 Verification pipeline → V3.7 Rollback → V3.8 Audit trail → V3.9 UI → V3.10 Full security/E2E validation. Detail in `docs/roadmap-v3.md`.
+
+> **V3.3 implementation status:** the digest + authorization phase is implemented as the **execution-authorization gate** (ADR-009, `docs/v3-execution-authorization.md`): deterministic re-validation of digest/policy/freshness/expiry/kill-switch, a server-owned fail-closed `system_controls` kill switch (POL-007 now live on re-evaluation paths), one-time atomic consumption, and an immutable, non-executable execution-authorization contract. Still no execution capability of any kind; the sandbox (V3.4) remains unbuilt.
 
 ---
 

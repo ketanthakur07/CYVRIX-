@@ -43,6 +43,18 @@ class Settings(BaseSettings):
     # V3.1 action proposals (proposal creation only — no execution exists)
     action_proposal_rate_limit_per_hour: int = 20
 
+    # V3.2 approvals (authorization data only — still no execution)
+    approval_rate_limit_per_hour: int = 30
+    approval_ttl_minutes: int = 60
+    step_up_max_age_minutes: int = 15
+
+    # V3.3 execution authorization (the final deterministic gate — no execution)
+    execution_authorization_rate_limit_per_hour: int = 30
+
+    # V3.4 sandboxed execution (isolated local processing only — no Git/GitHub writes)
+    executor_service_token: str = ""  # service identity for the internal executor API
+    execution_admission_rate_limit_per_hour: int = 10
+
     # Scan limits
     max_repo_size_mb: int = 500
     scan_timeout_minutes: int = 10

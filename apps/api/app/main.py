@@ -12,7 +12,9 @@ from app.database import init_db
 from app.config import get_settings
 from app.routes import repos, scans, findings, github, dashboard, auth
 from app.routes import container, recommendations, reports
-from app.routes import actions
+from app.routes import actions, approvals
+from app.routes import execution_authorization
+from app.routes import execution_runs
 from app.session import get_redis, close_redis
 import logging
 
@@ -76,6 +78,20 @@ app.include_router(reports.router)
 
 # Include V3.1 router (proposals only — no execution capability)
 app.include_router(actions.router)
+
+# Include V3.2 router (human approval — authorization data only, still no execution)
+app.include_router(approvals.router)
+
+# Include V3.3 router (execution authorization — the final deterministic
+# gate between APPROVED and FUTURE EXECUTION; authorization records only,
+# NO execution capability of any kind)
+app.include_router(execution_authorization.router)
+
+# Include V3.4 router (sandboxed execution — the FIRST real execution.
+# Internal service-identity admission only; every run consumes exactly
+# one V3.3 authorization; isolated, bounded, non-publishing; NO Git/
+# GitHub writes, NO PRs, NO deployments)
+app.include_router(execution_runs.router)
 
 
 @app.get("/api/health/live")

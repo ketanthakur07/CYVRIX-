@@ -1,7 +1,7 @@
 # CYVRIX V3 — Security Model
 
-Status: DESIGN (no implementation). V3.1 implements the action model, policy engine (with kill-switch rule POL-007 wired but inactive until execution exists), and read-only + proposal-creation APIs with full ownership-chain enforcement — see docs/v3-action-model.md.
-Companion: `v3-architecture.md`, `v3-action-policy.md`, `v3-execution-model.md`, `v3-threat-model.md`
+Status: DESIGN + PARTIAL IMPLEMENTATION. V3.1 implements the action model, policy engine, and read-only + proposal-creation APIs with full ownership-chain enforcement — see docs/v3-action-model.md. V3.2 implements §6 (human approval) as authorization data only: digest-bound approvals, one-time hashed tokens, step-up re-auth, second-principal rule, bounded expiry — see docs/v3-approval-model.md and ADR-008. V3.3 implements TB-3 (the execution-authorization gate): deterministic re-validation of every security invariant, a server-owned fail-closed kill switch (system_controls table, also feeding POL-007), one-time atomic consumption, and the immutable execution-authorization contract — see docs/v3-execution-authorization.md and ADR-009. V3.4 implements the FIRST real execution: sandboxed LOCAL structured execution only (ephemeral container-per-run, non-root uid 10001, cap_drop ALL, no-new-privileges, pinned seccomp, network_mode none, read-only rootfs, frozen resource limits, no credentials in the sandbox, host-side BEFORE/AFTER scope verification, atomic exactly-once admission consuming the V3.3 authorization) — V3.4 does NOT provide GitHub push, pull requests, production repository mutation, rollback (V3.7), or the hash-chained audit chain (V3.8); see docs/v3-execution-model.md.
+Companion: `v3-architecture.md`, `v3-action-policy.md`, `v3-approval-model.md`, `v3-execution-authorization.md`, `v3-execution-model.md`, `v3-threat-model.md`
 
 ---
 
@@ -152,6 +152,8 @@ Approval consumed ──► Orchestrator requests a scoped, short-lived installa
 
 ## 6. Approval Security Detail
 
+> **V3.2 implementation note:** the rules below are now implemented — see `docs/v3-approval-model.md` for the authoritative implementation semantics (state machine, token model, audit events, no-execution regression). Self-approval requires a fresh GitHub re-authentication step-up (no fake MFA); HIGH/CRITICAL require a second principal; in the current single-owner data model that requirement fails closed (`SECOND_APPROVER_REQUIRED`) until the co-owner/roles model lands.
+
 - **Who can approve:** users on the ownership chain whose role satisfies the policy level (V3.0 roles: `owner`, `approver` — additive; single-user installs are all owners).
 - **Who cannot approve:** creator of the proposal when policy level ≥ HIGH (second principal required); users without repository ownership; the AI/automation (no human identity ⇒ cannot approve); revoked or expired sessions.
 - **Self-approval:** LOW → allowed with step-up auth; MEDIUM → allowed with step-up + typed justification; HIGH/CRITICAL → not allowed, second principal required, and in single-user installations those classes are out of scope (deny with `SECOND_APPROVER_REQUIRED`).
@@ -253,4 +255,5 @@ Rules: security events are structured logs + metrics with a fixed schema; never 
 | Rate limiting | Redis buckets + DB constraints | Load/abuse test |
 | Kill switch | 3-point fail-closed check | Failure test (DB down + switch on) |
 | Double execution | Idempotency + advisory lock | Concurrency test |
+| Concurrent decision races (V3.2) | Proposal row lock + in-lock re-checks + `uq_approvals_live` unique index | Genuine simultaneous-request race tests (`test_approval_races.py`, real PG, ≥10 reps/class) |
 | Prompt injection resistance | Hierarchy §2 + content-as-data | Adversarial test (golden path 3) |

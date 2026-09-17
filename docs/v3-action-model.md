@@ -1,8 +1,8 @@
 # CYVRIX V3.1 — Action Model Implementation
 
-Status: **IMPLEMENTED** (V3.1 — side-effect free)
+Status: **IMPLEMENTED** (V3.1 — side-effect free; V3.2 adds approval as authorization data only — see `v3-approval-model.md`)
 Scope: ActionProposal domain model + deterministic policy engine. **No execution capability.**
-Code: `apps/api/app/services/action_model.py`, `action_digest.py`, `policy_engine.py`, `app/routes/actions.py`, `app/models.py` (`ActionProposal`), migration `004`.
+Code: `apps/api/app/services/action_model.py`, `action_digest.py`, `policy_engine.py`, `app/routes/actions.py`, `app/models.py` (`ActionProposal`), migration `004`. V3.2 additions: `app/services/approval_model.py`, `app/services/approval_service.py`, `app/routes/approvals.py`, `app/models.py` (`Approval`), migration `005`.
 
 ---
 
@@ -30,7 +30,7 @@ Persisted entity (`action_proposals`, migration 004, additive only). Identity: *
 | Policy result | `policy_version`, `policy_decision`, `policy_reason_code`, `policy_matched_rule`, `policy_explanation` | Deterministic, versioned, auditable |
 | Lifecycle | `status`, `expires_at` (server-derived = created_at + 24h, client cannot set), `created_at`, `created_by` | Expiry enforced at evaluation and reconciled on read (V2 scan-timeout precedent) |
 
-Statuses in V3.1: `PROPOSED` (transient), `POLICY_CHECKED` (decision = REQUIRE_APPROVAL; ALLOW unused in V3.1), `REJECTED` (DENY — persisted for audit), `EXPIRED` (on-read reconciliation), `STALE` (reserved; helper API defined, consumed by V3.2+).
+Statuses in V3.1: `PROPOSED` (transient), `POLICY_CHECKED` (decision = REQUIRE_APPROVAL; ALLOW unused in V3.1), `REJECTED` (DENY — persisted for audit), `EXPIRED` (on-read reconciliation), `STALE` (reserved; helper API defined, consumed by V3.2+). V3.2 adds `APPROVED` (human approval recorded — **still not executed**).
 
 Exclusions from digest (documented in `action_digest.py`): `id`, `created_at`, `created_by`, `status`, expiry, policy fields — the digest represents executable semantics only.
 

@@ -274,6 +274,71 @@ export const SOURCE_TYPE_ICONS: Record<SourceType, string> = {
   LOG: "📋",
 };
 
+// ── V3.1/V3.2 Action Proposals & Approvals ─────────────────────────
+
+export type ProposalStatus =
+  | "PROPOSED"
+  | "POLICY_CHECKED"
+  | "REJECTED"
+  | "EXPIRED"
+  | "STALE"
+  | "APPROVED";
+
+export type ApprovalState =
+  | "PENDING"
+  | "APPROVED"
+  | "REJECTED"
+  | "EXPIRED"
+  | "REVOKED"
+  | "USED";
+
+export interface ActionProposal {
+  id: string;
+  finding_id: string;
+  recommendation_id: string;
+  repository_id: string;
+  created_by?: string;
+  action_type: string;
+  status: ProposalStatus;
+  base_commit_sha: string;
+  target_branch: string;
+  files: string[];
+  operations: Record<string, unknown>[];
+  expected_diff: string;
+  rationale: string | null;
+  evidence: Record<string, unknown> | null;
+  risk_score: number;
+  risk_level: RiskLevel;
+  recommendation_trust: string | null;
+  validation_state: ValidationState | null;
+  policy_version: string;
+  policy_decision: string;
+  policy_reason_code: string;
+  policy_matched_rule: string;
+  policy_explanation: string | null;
+  action_digest: string;
+  expires_at: string | null;
+  created_at: string | null;
+}
+
+export interface Approval {
+  id: string;
+  action_proposal_id: string;
+  action_digest: string;
+  approver_user_id: string;
+  second_approver_user_id: string | null;
+  approval_state: ApprovalState;
+  approval_reason: string | null;
+  policy_version: string;
+  policy_decision: string;
+  approval_level: string | null;
+  approved_at: string | null;
+  expires_at: string | null;
+  authorization_issued_at: string | null;
+  authorization_used_at: string | null;
+  created_at: string | null;
+}
+
 // ── V2 Trust Level Colors ─────────────────────────────────────────
 
 export const TRUST_LEVEL_COLORS: Record<TrustLevel, string> = {
@@ -289,4 +354,15 @@ export const VALIDATION_STATE_COLORS: Record<ValidationState, string> = {
   PARTIALLY_VALIDATED: "bg-yellow-100 text-yellow-800",
   UNVERIFIED: "bg-gray-100 text-gray-600",
   UNSAFE: "bg-red-100 text-red-800",
+};
+
+// ── V3.2 Approval State Colors ────────────────────────────────────
+
+export const APPROVAL_STATE_COLORS: Record<ApprovalState, string> = {
+  PENDING: "bg-yellow-100 text-yellow-800",
+  APPROVED: "bg-green-100 text-green-800",
+  REJECTED: "bg-red-100 text-red-800",
+  EXPIRED: "bg-gray-100 text-gray-800",
+  REVOKED: "bg-purple-100 text-purple-800",
+  USED: "bg-blue-100 text-blue-800",
 };
