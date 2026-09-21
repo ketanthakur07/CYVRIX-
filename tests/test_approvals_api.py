@@ -1130,23 +1130,44 @@ class TestNoExecutionBoundary:
         executor service identity (POST /api/executor/runs is service-token
         gated — see test_execution_runs_api.py::TestExecutorServiceIdentity);
         every user-session-reachable run route is read-only GET. No route a
-        user session can call starts execution, and no job is queued here."""
+        user session can call starts execution, and no job is queued here.
+
+        V3.5 refines it further: the remediation route
+        (POST /api/actions/runs/{run_id}/remediation) IS user-reachable but
+        executes NOTHING — it only creates the PENDING remediation record
+        from server-verified run state; the pipeline runs exclusively via
+        the service-identity-gated POST /api/executor/remediations/{id}/execute
+        ("execute" in its path, which the check below still refuses for any
+        user-reachable route by construction: it lives under /api/executor/)."""
         proposal = await seed_proposal(
             session_factory, test_repository, proposer_id=test_user.id,
         )
         approvals_client.post(f"/api/actions/{proposal.id}/approve", json={})
 
         INTERNAL_ADMISSION_PATH = "/api/executor/runs"  # service identity only
+        V35_INTERNAL_PIPELINE_PATH = "/api/executor/remediations"  # service only
+        USER_REMEDIATION_START = "/api/actions/runs/{run_id}/remediation"
         for r in app.routes:
             path = getattr(r, "path", "")
             run_path = path.replace("step-up", "")
             if "execute" in path:
-                raise AssertionError(f"user-executable route exists: {path}")
+                assert path.startswith(V35_INTERNAL_PIPELINE_PATH) or \
+                    path == V35_INTERNAL_PIPELINE_PATH + "/{remediation_id}/execute" or \
+                    path.startswith("/api/executor/"), (
+                    f"user-executable route exists: {path}")
             if "run" in run_path:
                 methods = {m for m in getattr(r, "methods", set()) if m != "HEAD"}
                 if path == INTERNAL_ADMISSION_PATH:
                     assert methods <= {"POST"}, (
                         f"internal admission route must be POST-only: {path}"
+                    )
+                elif path == USER_REMEDIATION_START:
+                    # V3.5: user START of a remediation record is allowed —
+                    # it performs no git/GitHub effect (verified in
+                    # test_git_remediation.py; the pipeline is service-only).
+                    assert methods <= {"POST", "GET"}, (
+                        f"remediation route must be start/read-only: "
+                        f"{path} has {sorted(methods)}"
                     )
                 else:
                     assert methods <= {"GET"}, (

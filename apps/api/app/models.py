@@ -539,3 +539,309 @@ class SystemControl(Base):
     key = Column(Text, primary_key=True, nullable=False)
     value = Column(Text, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class GitRemediation(Base):
+    """V3.5 — controlled Git/GitHub remediation of one verified V3.4 run.
+
+    Security properties:
+    - Created ONLY from server-side verified run state (RESULT_READY or
+      COMPLETED with host-side scope verification) — never from client
+      claims; the client supplies nothing security-relevant
+    - Exactly-once: UNIQUE execution_run_id; a replayed remediation is
+      refused at the database level
+    - One live pipeline per authorization (partial unique index); one
+      deterministic remediation branch per repository among live rows
+    - The full Git/GitHub contract (repo identity, base SHA, branches,
+      authorized file set, stage ceiling) is frozen at creation into a
+      digestable contract; later mismatch is a tamper event, never repaired
+    - Stage ceiling is server-derived (LOCAL_ONLY < COMMIT_ALLOWED <
+      PUSH_ALLOWED < PR_ALLOWED); no implicit privilege escalation
+    - GitHub credential issuances are audit-recorded WITHOUT token material
+    - NO force push, NO default-branch push — enforced in the Git layer
+    """
+
+    __tablename__ = "git_remediations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    execution_run_id = Column(
+        UUID(as_uuid=True), ForeignKey("execution_runs.id"), nullable=False
+    )
+    execution_authorization_id = Column(
+        UUID(as_uuid=True), ForeignKey("execution_authorizations.id"), nullable=False
+    )
+    action_proposal_id = Column(
+        UUID(as_uuid=True), ForeignKey("action_proposals.id"), nullable=False
+    )
+    repository_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id"), nullable=False)
+    action_digest = Column(Text, nullable=False)  # copied, immutable
+
+    # Frozen contract + its canonical digest (tamper evidence)
+    remediation_contract = Column(JSONB, nullable=False)
+    remediation_contract_digest = Column(Text, nullable=False)
+    contract_version = Column(Text, nullable=False)
+
+    # Canonical repository identity (verified against ownership chain AND
+    # the GitHub remote before any push)
+    repo_owner = Column(Text, nullable=False)
+    repo_name = Column(Text, nullable=False)
+    installation_id = Column(BigInteger, nullable=False)
+    base_commit_sha = Column(Text, nullable=False)
+    source_branch = Column(Text, nullable=False)
+    target_branch = Column(Text, nullable=False)
+
+    remediation_state = Column(Text, nullable=False, default="PENDING")
+    fail_reason_code = Column(Text)
+    fail_detail = Column(Text)
+
+    remediation_branch = Column(Text, nullable=False)  # server-generated
+    committed_sha = Column(Text)
+    pushed_sha = Column(Text)
+    pr_number = Column(Integer)
+    pr_url = Column(Text)
+    pr_state = Column(Text)
+
+    stage_ceiling = Column(Text, nullable=False)
+    cleanup_status = Column(Text, nullable=False, default="NOT_STARTED")
+    cleanup_detail = Column(Text)
+
+    created_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    finished_at = Column(DateTime(timezone=True))
+
+    __table_args__ = (
+        # Exactly-once per execution run
+        Index("uq_git_remediations_run", "execution_run_id", unique=True),
+        # At most one live pipeline per authorization
+        Index(
+            "uq_git_remediations_live",
+            "execution_authorization_id",
+            unique=True,
+            postgresql_where=text(
+                "remediation_state IN ('PENDING', 'VERIFYING', 'COMMITTING', "
+                "'COMMITTED', 'PUSHING', 'PUSHED', 'PR_CREATING')"
+            ),
+            sqlite_where=text(
+                "remediation_state IN ('PENDING', 'VERIFYING', 'COMMITTING', "
+                "'COMMITTED', 'PUSHING', 'PUSHED', 'PR_CREATING')"
+            ),
+        ),
+        # Branch-name collision guard among live rows
+        Index(
+            "uq_git_remediations_branch_live",
+            "repository_id", "remediation_branch",
+            unique=True,
+            postgresql_where=text(
+                "remediation_state IN ('PENDING', 'VERIFYING', 'COMMITTING', "
+                "'COMMITTED', 'PUSHING', 'PUSHED', 'PR_CREATING', 'PR_CREATED')"
+            ),
+            sqlite_where=text(
+                "remediation_state IN ('PENDING', 'VERIFYING', 'COMMITTING', "
+                "'COMMITTED', 'PUSHING', 'PUSHED', 'PR_CREATING', 'PR_CREATED')"
+            ),
+        ),
+        Index("ix_git_remediations_state", "remediation_state"),
+        Index("ix_git_remediations_repo", "repository_id"),
+        Index("ix_git_remediations_digest", "action_digest"),
+    )
+
+
+class VerificationRun(Base):
+    """V3.6 — one verification lifecycle for one committed Git remediation.
+
+    Security properties:
+    - Created ONLY from server-side remediation state (PR_CREATED/
+      PUSHED/COMMITTED with committed_sha present) — never client claims;
+      the request body carries NOTHING security-relevant
+    - Exactly-once per remediation: UNIQUE git_remediation_id (a
+      verification verdict is final; re-verification is a new decision
+      made through a new remediation, never a state rewrite)
+    - The frozen VerificationPlan + its canonical digest are persisted;
+      a later plan-digest mismatch is a tamper event, never repaired
+    - result ∈ PASS/FAIL/INCONCLUSIVE/SKIPPED/BLOCKED (Phase 3); COMPLETED
+      is recorded only after ALL planned checks have evidence rows
+    - evidence is bounded + scrubbed; repository output is untrusted data
+    """
+
+    __tablename__ = "verification_runs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    git_remediation_id = Column(
+        UUID(as_uuid=True), ForeignKey("git_remediations.id"), nullable=False
+    )
+    execution_run_id = Column(
+        UUID(as_uuid=True), ForeignKey("execution_runs.id"), nullable=False
+    )
+    repository_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id"), nullable=False)
+    action_digest = Column(Text, nullable=False)  # copied, immutable
+
+    verification_state = Column(Text, nullable=False, default="PENDING")
+    result = Column(Text)  # PASS|FAIL|INCONCLUSIVE|SKIPPED|BLOCKED (on COMPLETED)
+    reason_code = Column(Text)
+    detail = Column(Text)
+
+    # Frozen plan + digest (tamper evidence)
+    verification_plan = Column(JSONB, nullable=False)
+    plan_digest = Column(Text, nullable=False)
+    plan_version = Column(Text, nullable=False)
+
+    checks_total = Column(Integer, nullable=False, default=0)
+    checks_passed = Column(Integer, nullable=False, default=0)
+    checks_failed = Column(Integer, nullable=False, default=0)
+    checks_other = Column(Integer, nullable=False, default=0)
+
+    started_at = Column(DateTime(timezone=True))
+    finished_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        # Exactly-once per remediation
+        Index("uq_verification_runs_remediation", "git_remediation_id", unique=True),
+        Index("ix_verification_runs_state", "verification_state"),
+        Index("ix_verification_runs_repo", "repository_id"),
+    )
+
+
+class VerificationCheck(Base):
+    """V3.6 — one deterministic verification check + its bounded evidence.
+
+    One row per planned check per verification run. Evidence contains
+    expected/observed conditions (scrubbed, bounded) — never raw command
+    output, never secret-shaped material, never repository claims.
+    """
+
+    __tablename__ = "verification_checks"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    verification_run_id = Column(
+        UUID(as_uuid=True), ForeignKey("verification_runs.id"), nullable=False
+    )
+    check_type = Column(Text, nullable=False)
+    check_version = Column(Text, nullable=False)
+    result = Column(Text, nullable=False)  # PASS|FAIL|INCONCLUSIVE|SKIPPED|BLOCKED
+    reason_code = Column(Text, nullable=False)
+    evidence = Column(JSONB, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "verification_run_id", "check_type", name="uq_verification_checks_type"
+        ),
+        Index("ix_verification_checks_run", "verification_run_id"),
+    )
+
+
+class RollbackRun(Base):
+    """V3.6 — one controlled rollback of one pushed Git remediation.
+
+    Security properties:
+    - Created ONLY for remediations whose push actually happened
+      (pushed_sha present) — there is no rollback of a local-only commit
+    - The rollback TARGET is server-derived: the frozen contract's
+      base_commit_sha. The client can never name a SHA (no arbitrary-SHA
+      rollback endpoint exists by design)
+    - Exactly-once per remediation: UNIQUE git_remediation_id (the
+      idempotency key IS the remediation identity)
+    - Pre-flight state verification: the remote remediation branch tip
+      must still equal the remediation's pushed_sha; a moved/stale branch
+      → CONFLICT (fail closed, no blind rollback)
+    - Mechanism: NEW revert branch + revert commit + PR (Phase 19) —
+      NO force push, NO history rewrite, NO default-branch mutation
+    - COMPLETED is recorded only after post-rollback verification proved
+      the revert landed on the remote (never success-before-proof)
+    """
+
+    __tablename__ = "rollback_runs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    git_remediation_id = Column(
+        UUID(as_uuid=True), ForeignKey("git_remediations.id"), nullable=False
+    )
+    repository_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id"), nullable=False)
+    action_digest = Column(Text, nullable=False)  # copied, immutable
+
+    rollback_state = Column(Text, nullable=False, default="PENDING")
+    fail_reason_code = Column(Text)
+    fail_detail = Column(Text)
+
+    # Server-derived target + verification context (no client input)
+    rollback_target_sha = Column(Text, nullable=False)   # contract base_commit_sha
+    expected_branch_sha = Column(Text, nullable=False)   # remediation pushed_sha at request time
+    revert_branch = Column(Text, nullable=False)         # server-generated
+    revert_sha = Column(Text)
+    revert_pr_number = Column(Integer)
+    revert_pr_url = Column(Text)
+
+    cleanup_status = Column(Text, nullable=False, default="NOT_STARTED")
+    cleanup_detail = Column(Text)
+
+    requested_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    finished_at = Column(DateTime(timezone=True))
+
+    __table_args__ = (
+        # Exactly-once per remediation (idempotency key)
+        Index("uq_rollback_runs_remediation", "git_remediation_id", unique=True),
+        # Branch-name collision guard among live rows
+        Index(
+            "uq_rollback_runs_branch_live",
+            "repository_id", "revert_branch",
+            unique=True,
+            postgresql_where=text(
+                "rollback_state IN ('PENDING', 'PRECHECK', 'ROLLING_BACK', 'VERIFYING')"
+            ),
+            sqlite_where=text(
+                "rollback_state IN ('PENDING', 'PRECHECK', 'ROLLING_BACK', 'VERIFYING')"
+            ),
+        ),
+        Index("ix_rollback_runs_state", "rollback_state"),
+        Index("ix_rollback_runs_repo", "repository_id"),
+    )
+
+
+class GithubCredentialIssuance(Base):
+    """V3.5 — audit-only record of a short-lived, repo-scoped GitHub
+    credential issuance bound to one remediation.
+
+    The token itself is NEVER persisted (no plaintext, no hash): it lives
+    only in process memory for the duration of the authorized push/PR step.
+    This record makes issuance observable and revocation semantics
+    auditable without creating a credential store.
+    """
+
+    __tablename__ = "github_credential_issuances"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    git_remediation_id = Column(
+        UUID(as_uuid=True), ForeignKey("git_remediations.id"), nullable=False
+    )
+    execution_authorization_id = Column(
+        UUID(as_uuid=True), ForeignKey("execution_authorizations.id"), nullable=False
+    )
+    repository_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id"), nullable=False)
+    installation_id = Column(BigInteger, nullable=False)
+    repo_owner = Column(Text, nullable=False)
+    repo_name = Column(Text, nullable=False)
+    issued_at = Column(DateTime(timezone=True), default=utcnow)
+    expires_at = Column(DateTime(timezone=True))
+    result = Column(Text, nullable=False, default="ISSUED")  # ISSUED | DENIED
+    # What the credential authorizes: the remediation pipeline push or the
+    # V3.6 rollback revert push. One ISSUED issuance per (remediation,
+    # purpose) — a rollback is a distinct audited authorization, not a
+    # replay of the original push credential.
+    purpose = Column(Text, nullable=False, server_default="REMEDIATION_PUSH")
+    fail_reason_code = Column(Text)
+    # NOTE: intentionally NO token column of any kind.
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        Index(
+            "uq_github_credential_issuances_key",
+            "git_remediation_id", "purpose", "result",
+            unique=True,
+            postgresql_where=text("result = 'ISSUED'"),
+            sqlite_where=text("result = 'ISSUED'"),
+        ),
+        Index("ix_github_credential_issuances_remediation",
+              "git_remediation_id"),
+    )

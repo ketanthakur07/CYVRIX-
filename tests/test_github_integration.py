@@ -353,8 +353,13 @@ class TestTokenSecurity:
 class TestGitHubService:
     def test_jwt_creation_without_config(self):
         from app.services.github import _create_jwt, GitHubAuthError
-        from app.config import get_settings
-        get_settings.cache_clear()
+        # NOTE: deliberately NO get_settings.cache_clear() here. Clearing
+        # the lru_cache swaps the settings singleton for a fresh object,
+        # while modules that captured `settings = get_settings()` at import
+        # time (e.g. routes/execution_runs.py) keep the original — later
+        # suites patching executor_service_token on the new object would
+        # then hit EXECUTOR_DISABLED at request time. The patch() below
+        # fully controls the config this test needs.
         with patch("app.services.github.settings") as mock_settings:
             mock_settings.github_app_id = ""
             mock_settings.github_app_private_key = ""

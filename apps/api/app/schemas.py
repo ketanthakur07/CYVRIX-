@@ -592,6 +592,141 @@ class ExecutionAdmissionRequest(BaseModel):
     token: str = Field(min_length=8, max_length=256)  # the one-time approval token
 
 
+class GitRemediationStartRequest(BaseModel):
+    """User request to start Git/GitHub remediation for a verified run.
+
+    Supplies NOTHING security-relevant: no branch name, no stage ceiling,
+    no digest, no repository identity. Every authorization value is
+    server-derived (extra="forbid" rejects authority parameters).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+# ── V3.5 — controlled Git/GitHub remediation ─────────────────────────
+
+
+class GitRemediationResponse(BaseModel):
+    """Bounded remediation metadata. No credentials, no tokens, no
+    workspace content, no unbounded logs."""
+
+    id: UUID
+    execution_run_id: UUID
+    execution_authorization_id: UUID
+    action_proposal_id: UUID
+    repository_id: UUID
+    action_digest: str
+    remediation_state: str
+    fail_reason_code: Optional[str] = None
+    fail_detail: Optional[str] = None
+    repo_owner: str
+    repo_name: str
+    base_commit_sha: str
+    source_branch: str
+    target_branch: str
+    remediation_branch: str
+    committed_sha: Optional[str] = None
+    pushed_sha: Optional[str] = None
+    pr_number: Optional[int] = None
+    pr_url: Optional[str] = None
+    pr_state: Optional[str] = None
+    stage_ceiling: str
+    cleanup_status: str
+    created_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+# ── V3.6 — verification + rollback ─────────────────────────────────
+
+
+class VerificationStartRequest(BaseModel):
+    """User request to verify a committed remediation.
+
+    Supplies NOTHING security-relevant (extra="forbid" rejects authority
+    parameters like verified=true, result=PASS, plan overrides). Every
+    verification input is server-derived from the frozen plan."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class VerificationCheckResponse(BaseModel):
+    """One deterministic check + its bounded evidence. Evidence contains
+    expected/observed conditions only — never raw repository output."""
+
+    check_type: str
+    check_version: str
+    result: str
+    reason_code: str
+    evidence: dict
+
+    model_config = {"from_attributes": True}
+
+
+class VerificationRunResponse(BaseModel):
+    """Bounded verification metadata. No credentials, no tokens, no
+    workspace content, no unbounded repository output."""
+
+    id: UUID
+    git_remediation_id: UUID
+    execution_run_id: UUID
+    repository_id: UUID
+    action_digest: str
+    verification_state: str
+    result: Optional[str] = None
+    reason_code: Optional[str] = None
+    detail: Optional[str] = None
+    plan_version: str
+    plan_digest: str
+    checks_total: int
+    checks_passed: int
+    checks_failed: int
+    checks_other: int
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    verification_plan: dict
+
+    model_config = {"from_attributes": True}
+
+
+class RollbackStartRequest(BaseModel):
+    """User request to roll back a pushed remediation.
+
+    Supplies NOTHING security-relevant: NO SHA, no branch name, no
+    target (extra="forbid" rejects rollback_sha=... style authority
+    parameters). The rollback target is server-derived from the frozen
+    contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class RollbackRunResponse(BaseModel):
+    """Bounded rollback metadata. The target SHA here is the server-
+    derived constant copied from the frozen contract — accepting it as
+    input is impossible by construction."""
+
+    id: UUID
+    git_remediation_id: UUID
+    repository_id: UUID
+    action_digest: str
+    rollback_state: str
+    fail_reason_code: Optional[str] = None
+    fail_detail: Optional[str] = None
+    rollback_target_sha: str
+    expected_branch_sha: str
+    revert_branch: str
+    revert_sha: Optional[str] = None
+    revert_pr_number: Optional[int] = None
+    revert_pr_url: Optional[str] = None
+    cleanup_status: str
+    created_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
 class ExecutionRunResponse(BaseModel):
     """Bounded execution-run metadata (§48). No secrets, no workspace
     content, no credentials, no unbounded logs. Status words are

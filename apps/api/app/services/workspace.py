@@ -69,6 +69,22 @@ def new_workspace_dir() -> str:
     return path
 
 
+def _rmtree_force_remove(func, path, _exc_info) -> None:
+    """rmtree error handler: clear the read-only bit and retry.
+
+    Git writes object/idx files read-only (0444); on POSIX root removes
+    them regardless, but on Windows the deletion fails with
+    PermissionError unless the bit is cleared first. Workspace content is
+    hostile data — this only ever relaxes OUR OWN sandbox files.
+    """
+    import stat as _stat
+    try:
+        os.chmod(path, _stat.S_IWRITE | _stat.S_IREAD)
+        func(path)
+    except OSError:
+        raise
+
+
 def remove_workspace_dir(path: str) -> tuple[bool, str]:
     try:
         # Defense in depth: refuse to rm -rf anything outside the
@@ -78,7 +94,12 @@ def remove_workspace_dir(path: str) -> tuple[bool, str]:
         real = os.path.realpath(path)
         if real != root and not real.startswith(root + os.sep):
             return False, "refusing to remove path outside sandbox workspace root"
-        shutil.rmtree(path, ignore_errors=False)
+        import sys as _sys
+        if _sys.version_info >= (3, 12):
+            shutil.rmtree(path, ignore_errors=False, onexc=_rmtree_force_remove)
+        else:
+            shutil.rmtree(path, ignore_errors=False,
+                          onerror=_rmtree_force_remove)
         return True, ""
     except Exception as exc:
         return False, f"{type(exc).__name__}"

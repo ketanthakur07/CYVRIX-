@@ -515,6 +515,13 @@ def bind_session_lookups(db: AsyncSession) -> None:
     _session_installation = _installation
 
 
+# Optional process-level sandbox factory override (module attribute so
+# integration/race harnesses can substitute a deterministic in-process
+# executor without touching the docker layer). Production code never sets
+# it; the real container factory is used whenever it is None.
+SANDBOX_FACTORY = None
+
+
 async def execute_authorized_run(
     db: AsyncSession,
     *,
@@ -582,7 +589,7 @@ async def execute_authorized_run(
                 ws_dir, list(proposal.files or ()), list(proposal.operations or ())
             )
             before_snap = workspace_svc.snapshot_workspace(ws_dir, "BEFORE")
-            factory = sandbox_factory or sandbox_svc.create_sandbox
+            factory = sandbox_factory or SANDBOX_FACTORY or sandbox_svc.create_sandbox
             sandbox = factory(ws_dir)
         except sandbox_svc.SandboxUnavailable as exc:
             return await _fail_run(db, run, exc.reason_code, exc.detail,

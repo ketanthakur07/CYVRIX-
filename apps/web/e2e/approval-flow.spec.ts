@@ -204,28 +204,81 @@ test.describe("V3.2 Approval — decisions with DB verification", () => {
     );
     expect(prop[0].status).toBe("APPROVED");
 
-    // No USER-executing route exists on the real API. V3.4 refines this
-    // invariant: run routes now exist, but every one is either the internal
-    // service-identity admission (POST /api/executor/runs — bearer-token
-    // gated, a browser/user session can never invoke it) or a read-only
-    // GET status view. No route a user session can call starts execution.
+    // No USER-executing route exists on the real API. V3.4/V3.5/V3.6
+    // refine this invariant: executor routes exist, but every one is
+    // either the internal service-identity boundary (bearer-token gated,
+    // a browser/user session can never invoke it) or a read-only GET
+    // status view. No route a user session can call starts execution.
     const openapi = await (await fetch(`${API_URL}/openapi.json`)).json();
-    const execPaths = Object.keys(openapi.paths).filter(
-      (p) => /execute|remediat/.test(p) && !p.includes("step-up"),
+
+    // Every POST /api/executor/* path must reject a user session. The
+    // boundary is require_executor_service: fail-closed when
+    // EXECUTOR_SERVICE_TOKEN is unset (503 EXECUTOR_DISABLED) and 401 on a
+    // bad token when configured. The OpenAPI spec does not model custom
+    // header dependencies as security schemes, so the real invariant is
+    // runtime: a browser/user session can NEVER successfully invoke any
+    // executor POST.
+    const executorPaths = Object.keys(openapi.paths).filter(
+      (p) => p.startsWith("/api/executor/"),
     );
-    expect(execPaths).toEqual([]);
-    const allowedRunPaths: Record<string, string[]> = {
-      "/api/executor/runs": ["post"],                  // service identity only
-      "/api/executor/runs/{run_id}": ["get"],
-      "/api/executor/runs/user/{run_id}": ["get"],
-      "/api/actions/{proposal_id}/runs": ["get"],
-    };
-    const runPaths = Object.keys(openapi.paths).filter((p) => /\brun/.test(p));
-    expect(runPaths.sort()).toEqual(Object.keys(allowedRunPaths).sort());
-    for (const p of runPaths) {
-      const methods = Object.keys(openapi.paths[p]).filter((m) => m !== "parameters");
-      expect(methods).toEqual(allowedRunPaths[p]);
+    const postablePaths = executorPaths.filter(
+      (p) => openapi.paths[p].post,
+    );
+    // Non-POST executor paths must be the read-only GET status views.
+    for (const p of executorPaths) {
+      if (!postablePaths.includes(p)) {
+        expect(
+          openapi.paths[p].get,
+          `${p} must be a read-only GET status view`,
+        ).toBeTruthy();
+      }
     }
+    const sessionCookies = await page.context().cookies();
+    const sessionCookie = sessionCookies
+      .map((c) => `${c.name}=${c.value}`)
+      .join("; ");
+    for (const p of postablePaths) {
+      const res = await page.request.post(`${API_URL}${p}`, {
+        headers: { cookie: sessionCookie },
+        data: {},
+        failOnStatusCode: false,
+      });
+      expect(
+        [401, 403, 503].includes(res.status()),
+        `${p} must reject a user session (got ${res.status()})`,
+      ).toBe(true);
+    }
+    // Executor paths must be exactly the known set (runs admission +
+    // remediation/verification/rollback execution).
+    expect(executorPaths.sort()).toEqual([
+      "/api/executor/remediations/{remediation_id}/execute",
+      "/api/executor/rollbacks/{rollback_id}/execute",
+      "/api/executor/runs",
+      "/api/executor/runs/{run_id}",
+      "/api/executor/runs/user/{run_id}",
+      "/api/executor/verifications/{verification_id}/execute",
+    ].sort());
+
+    // No user-callable route may start remediation/verification/rollback
+    // execution. Behavioral probe: a user session POSTing to a user
+    // execution-adjacent route can only create/lookup records (404 for an
+    // unknown id) — it can never trigger sandbox/Git execution. Execution
+    // happens solely via /api/executor/*, which requires the service token
+    // (verified above). Also guard against docstring drift: a user route
+    // whose description claims to execute anything must fail here.
+    const userExecPaths = Object.keys(openapi.paths).filter(
+      (p) =>
+        !p.startsWith("/api/executor/") &&
+        /remediat|verificat|rollback/.test(p) &&
+        Object.keys(openapi.paths[p]).some(
+          (m) =>
+            m === "post" &&
+            /\\bexecute[sd]?\\b(?!\\s+NOTHING)/.test(
+              openapi.paths[p][m].description ?? "",
+            ),
+        ),
+    );
+    expect(userExecPaths).toEqual([]);
 
     // Audit event for the grant exists with digest + actor
     // (DB column is "metadata"; the ORM maps it to event_metadata)

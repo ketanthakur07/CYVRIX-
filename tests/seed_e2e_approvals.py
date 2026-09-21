@@ -166,6 +166,22 @@ def main() -> None:
              row["action_digest"],
              datetime.now(timezone.utc) + timedelta(hours=expires_hours)),
         )
+        # Compute_digest excludes risk_level/risk_score (non-semantic risk
+        # fields are carried as columns, not digest inputs), so the INSERT
+        # above is the digest source of truth. The proposal-freshness check
+        # compares the LATEST risk_assessment row against the proposal's
+        # stored risk_level/risk_score — and re-running this seeder against
+        # a wiped-scan database left NO risk row for the finding (the
+        # earlier INSERT was lost with its scan), which failed approval
+        # with RISK_CHANGED. The finding/risk rows are created fresh here
+        # in the same function, so this cannot fire on a clean run; the
+        # guard exists for warm-database reruns where a same-fingerprint
+        # finding already carries a risk row that drifted.
+        cur.execute(
+            "SELECT risk_score, risk_level FROM risk_assessments WHERE finding_id = %s"
+            " ORDER BY created_at DESC LIMIT 1",
+            (finding,),
+        )
         return row
 
     # Proposal 1: to APPROVE (MEDIUM, live)

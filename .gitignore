@@ -40,6 +40,14 @@ venv/
 # Docker
 docker-compose.override.yml
 
+# Test / run artifacts
+*.log
+e2e_up.log
+apps/web/build_out.txt
+apps/web/e2e_pw*.txt
+tests/*.txt
+.freebuff/
+
 # Test artifacts
 htmlcov/
 .coverage

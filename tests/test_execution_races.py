@@ -287,6 +287,13 @@ def _fake_sandbox_factory():
     """In-process fake sandbox so races exercise ADMISSION concurrency
     (locks, unique indexes, commit conflicts), not container startup."""
     class _C:
+        def start(self):
+            pass  # in-process fake: work happens in wait()
+
+        @property
+        def attrs(self):
+            return {"State": {"ExitCode": 0}}
+
         def wait(self, *a, **k):
             return {"StatusCode": 0}
 

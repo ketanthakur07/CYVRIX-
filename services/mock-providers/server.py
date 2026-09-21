@@ -9,8 +9,11 @@ Mocks only external provider boundaries:
 All other CYVRIX services remain REAL.
 """
 import base64
+import gzip
 import json
+import logging
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -48,35 +51,37 @@ def _ensure_repo_initialized(repo_name: str) -> str:
     os.makedirs(REPOS_DIR, exist_ok=True)
     subprocess.run(["git", "init", "--bare", bare_path], check=True, capture_output=True)
 
-    # Clone fixture, commit, push to bare repo
-    tmp_dir = f"/tmp/work_{repo_name}"
-    if os.path.exists(tmp_dir):
-        subprocess.run(["rm", "-rf", tmp_dir], check=True)
+    # Clone fixture, commit, push to bare repo (portable temp dir — no /tmp,
+    # no rm -rf, no cp: works on Linux CI and Windows dev machines alike)
+    tmp_dir = tempfile.mkdtemp(prefix=f"work_{repo_name}_")
 
-    subprocess.run(["git", "init", tmp_dir], check=True, capture_output=True)
+    try:
+        subprocess.run(["git", "init", tmp_dir], check=True, capture_output=True)
 
-    # Copy fixture files
-    for item in os.listdir(fixture_path):
-        src = os.path.join(fixture_path, item)
-        dst = os.path.join(tmp_dir, item)
-        if os.path.isdir(src):
-            subprocess.run(["cp", "-r", src, dst], check=True)
-        else:
-            subprocess.run(["cp", src, dst], check=True)
+        # Copy fixture files
+        for item in os.listdir(fixture_path):
+            src = os.path.join(fixture_path, item)
+            dst = os.path.join(tmp_dir, item)
+            if os.path.isdir(src):
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, dst)
 
-    subprocess.run(["git", "add", "."], cwd=tmp_dir, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "-c", "user.name=Test", "-c", "user.email=test@test.com",
-         "commit", "-m", "Initial commit"],
-        cwd=tmp_dir, check=True, capture_output=True,
-    )
-    subprocess.run(
-        ["git", "-c", "user.name=Test", "-c", "user.email=test@test.com",
-         "branch", "-M", "main"],
-        cwd=tmp_dir, check=True, capture_output=True,
-    )
-    subprocess.run(["git", "remote", "add", "origin", bare_path], cwd=tmp_dir, check=True, capture_output=True)
-    subprocess.run(["git", "push", "origin", "main"], cwd=tmp_dir, check=True, capture_output=True)
+        subprocess.run(["git", "add", "."], cwd=tmp_dir, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@test.com",
+             "commit", "-m", "Initial commit"],
+            cwd=tmp_dir, check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@test.com",
+             "branch", "-M", "main"],
+            cwd=tmp_dir, check=True, capture_output=True,
+        )
+        subprocess.run(["git", "remote", "add", "origin", bare_path], cwd=tmp_dir, check=True, capture_output=True)
+        subprocess.run(["git", "push", "origin", "main"], cwd=tmp_dir, check=True, capture_output=True)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
     # Set HEAD to point to main so clones check out main
     head_file = os.path.join(bare_path, "HEAD")
@@ -114,11 +119,21 @@ async def github_list_repos(request: Request):
 
 
 @app.get("/repos/{owner}/{repo}/contents/{path:path}")
-async def github_file_content(owner: str, repo: str, path: str):
-    """Mock GitHub file content endpoint for investigation evidence gathering."""
+async def github_file_content(owner: str, repo: str, path: str,
+                              request: Request):
+    """Mock GitHub file content endpoint for investigation evidence gathering.
+
+    Default: base64 JSON (GitHub contents-API shape). When the client asks
+    for the raw media type (Accept: application/vnd.github.raw+json, as
+    workspace materialization does), serve the raw bytes instead.
+    """
     # Try to read from fixture
     fixture_path = os.path.join(FIXTURE_DIR, repo, path)
     if os.path.exists(fixture_path) and os.path.isfile(fixture_path):
+        if request.headers.get("Accept") == "application/vnd.github.raw+json":
+            with open(fixture_path, "rb") as f:
+                raw = f.read()
+            return Response(content=raw, media_type="application/octet-stream")
         with open(fixture_path, "r", errors="replace") as f:
             content = f.read()
         encoded = base64.b64encode(content.encode()).decode()
@@ -276,17 +291,68 @@ async def llm_chat_completions(request: Request):
 # Git Smart HTTP Protocol
 # ═══════════════════════════════════════════════════════════════════
 
+
+async def _git_request_body(request: Request) -> bytes:
+    """Request body with Content-Encoding handled (git smart HTTP).
+
+    git compresses large upload-pack/receive-pack request bodies with
+    `Content-Encoding: gzip` (the request grows with the number of refs
+    advertised — well past the threshold once a test module accumulates
+    remediation/revert branches). git http-backend decompresses before
+    feeding stdin; without that, `git upload-pack --stateless-rpc` sees
+    gzip bytes, exits immediately, and the client observes an empty 200
+    → 'fatal: the remote end hung up unexpectedly'.
+    """
+    body = await request.body()
+    encoding = (request.headers.get("Content-Encoding") or "").strip().lower()
+    if encoding == "gzip":
+        body = gzip.decompress(body)
+    elif encoding and encoding != "identity":
+        return JSONResponse(status_code=415, content={
+            "message": f"unsupported Content-Encoding: {encoding}"})
+    return body
+
+
+def _git_rpc_response(result: subprocess.CompletedProcess, media_type: str):
+    """Fail visibly (500) when the git RPC produced no output; an empty
+    200 makes the client report a confusing transport-level hang."""
+    if not result.stdout and result.returncode != 0:
+        return JSONResponse(status_code=500, content={
+            "message": "git rpc failed",
+            "detail": result.stderr.decode(errors="replace")[:500],
+        })
+    return Response(
+        content=result.stdout,
+        media_type=media_type,
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 @app.get("/{owner}/{repo}.git/info/refs")
 @app.post("/{owner}/{repo}.git/info/refs")
 async def git_info_refs(owner: str, repo: str, request: Request):
-    """Git smart HTTP: advertise refs."""
+    """Git smart HTTP: advertise refs (service-aware).
+
+    The advertised service MUST match the ?service= query parameter:
+    fetches advertise upload-pack, pushes advertise receive-pack. Serving
+    upload-pack for a receive-pack request makes pushes impossible (git
+    aborts with 'smart HTTP transport does not support...' style errors).
+    """
     bare_path = _ensure_repo_initialized(repo)
     service = request.query_params.get("service", "git-upload-pack")
 
-    result = subprocess.run(
-        ["git", "upload-pack", "--stateless-rpc", "--advertise-refs", bare_path],
-        capture_output=True,
-    )
+    if service == "git-receive-pack":
+        result = subprocess.run(
+            ["git", "receive-pack", "--advertise-refs", bare_path],
+            capture_output=True,
+        )
+        media_type = "application/x-git-receive-pack-advertisement"
+    else:
+        result = subprocess.run(
+            ["git", "upload-pack", "--stateless-rpc", "--advertise-refs", bare_path],
+            capture_output=True,
+        )
+        media_type = "application/x-git-upload-pack-advertisement"
 
     # Git smart HTTP requires the service line to be packet-framed
     service_line = f"# service={service}\n"
@@ -296,7 +362,7 @@ async def git_info_refs(owner: str, repo: str, request: Request):
 
     return Response(
         content=pkt,
-        media_type="application/x-git-upload-pack-advertisement",
+        media_type=media_type,
         headers={"Cache-Control": "no-cache"},
     )
 
@@ -305,7 +371,9 @@ async def git_info_refs(owner: str, repo: str, request: Request):
 async def git_upload_pack(owner: str, repo: str, request: Request):
     """Git smart HTTP: upload-pack (clone/fetch)."""
     bare_path = _ensure_repo_initialized(repo)
-    body = await request.body()
+    body = await _git_request_body(request)
+    if isinstance(body, JSONResponse):
+        return body
 
     result = subprocess.run(
         ["git", "upload-pack", "--stateless-rpc", bare_path],
@@ -313,11 +381,132 @@ async def git_upload_pack(owner: str, repo: str, request: Request):
         capture_output=True,
     )
 
-    return Response(
-        content=result.stdout,
-        media_type="application/x-git-upload-pack-result",
-        headers={"Cache-Control": "no-cache"},
+    return _git_rpc_response(result, "application/x-git-upload-pack-result")
+
+
+@app.post("/{owner}/{repo}.git/git-receive-pack")
+async def git_receive_pack(owner: str, repo: str, request: Request):
+    """Git smart HTTP: receive-pack (push) — V3.5 e2e support.
+
+    Accepts pushes like a real remote: ref updates land in the bare repo.
+    No force-push special handling: git itself rejects non-fast-forward
+    updates to existing branches (receive.denyNonFastForwards default on
+    bare shared repos is off, so we enable it explicitly).
+    """
+    bare_path = _ensure_repo_initialized(repo)
+    subprocess.run(
+        ["git", "config", "http.receivepack", "true"], cwd=bare_path,
+        capture_output=True,
     )
+    subprocess.run(
+        ["git", "config", "receive.denyNonFastForwards", "true"], cwd=bare_path,
+        capture_output=True,
+    )
+    body = await _git_request_body(request)
+    if isinstance(body, JSONResponse):
+        return body
+
+    result = subprocess.run(
+        ["git", "receive-pack", "--stateless-rpc", bare_path],
+        input=body,
+        capture_output=True,
+    )
+
+    return _git_rpc_response(result, "application/x-git-receive-pack-result")
+
+
+@app.get("/repos/{owner}/{repo}/branches/{branch:path}")
+async def github_get_branch(owner: str, repo: str, branch: str):
+    """Read back a branch (push verification, Phase 20).
+
+    {branch:path} — branch names legitimately contain slashes
+    (e.g. cyvrix/remediation/<uuid>); a plain segment param 404s on
+    them, which readback verification would misread as a missing
+    branch and fail closed.
+    """
+    try:
+        bare_path = _ensure_repo_initialized(repo)
+    except FileNotFoundError:
+        return JSONResponse(status_code=404, content={"message": "Not Found"})
+    result = subprocess.run(
+        ["git", "rev-parse", f"refs/heads/{branch}"],
+        cwd=bare_path, capture_output=True,
+    )
+    if result.returncode != 0:
+        return JSONResponse(status_code=404, content={"message": "Branch not found"})
+    sha = result.stdout.decode().strip()
+    return {
+        "name": branch,
+        "commit": {"sha": sha},
+    }
+
+
+# In-memory PR store (mock GitHub PRs) — keyed by (owner/repo, number)
+_pull_requests: dict[tuple[str, int], dict] = {}
+_pr_counter = {"n": 0}
+
+
+@app.post("/repos/{owner}/{repo}/pulls")
+async def github_create_pull(owner: str, repo: str, request: Request):
+    """Create a mock pull request (V3.5 e2e support).
+
+    Validates head/base like GitHub: the head branch must exist; base
+    must exist; duplicate open PR with the same head is rejected (422).
+    Returns the fields CYVRIX verifies (head/base refs + SHAs, repo).
+    """
+    body = await request.json()
+    head = body.get("head") or ""
+    base = body.get("base") or ""
+    try:
+        bare_path = _ensure_repo_initialized(repo)
+    except FileNotFoundError:
+        return JSONResponse(status_code=404, content={"message": "Not Found"})
+
+    def _ref_sha(ref: str):
+        r = subprocess.run(
+            ["git", "rev-parse", f"refs/heads/{ref}"],
+            cwd=bare_path, capture_output=True,
+        )
+        return r.stdout.decode().strip() if r.returncode == 0 else None
+
+    head_sha = _ref_sha(head)
+    base_sha = _ref_sha(base)
+    if not head or not base or head == base:
+        return JSONResponse(status_code=422, content={
+            "message": "Validation Failed", "errors": [
+                {"message": "head or base branch invalid"}]})
+    if head_sha is None or base_sha is None:
+        return JSONResponse(status_code=422, content={
+            "message": "Validation Failed", "errors": [
+                {"message": f"head or base ref not found (head={head}, base={base})"}]})
+    for (full, n), pr in _pull_requests.items():
+        if full == f"{owner}/{repo}" and pr["head"]["ref"] == head \
+                and pr["state"] == "open":
+            return JSONResponse(status_code=422, content={
+                "message": "Validation Failed", "errors": [
+                    {"message": "A pull request already exists for this branch."}]})
+    _pr_counter["n"] += 1
+    number = _pr_counter["n"]
+    pr = {
+        "number": number,
+        "state": "open",
+        "title": body.get("title", ""),
+        "body": body.get("body", ""),
+        "html_url": f"http://mock-providers:8100/repos/{owner}/{repo}/pull/{number}",
+        "head": {"ref": head, "sha": head_sha},
+        "base": {"ref": base, "sha": base_sha,
+                 "repo": {"full_name": f"{owner}/{repo}"}},
+    }
+    _pull_requests[(f"{owner}/{repo}", number)] = pr
+    return pr
+
+
+@app.get("/repos/{owner}/{repo}/pulls/{number}")
+async def github_get_pull(owner: str, repo: str, number: int):
+    pr = _pull_requests.get((f"{owner}/{repo}", number))
+    if pr is None:
+        return JSONResponse(status_code=404, content={"message": "Not Found"})
+    return pr
 
 
 @app.get("/{owner}/{repo}.git/HEAD")

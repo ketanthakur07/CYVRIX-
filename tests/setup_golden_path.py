@@ -57,11 +57,77 @@ def setup():
     conn.autocommit = True
     cur = conn.cursor()
 
-    # Clean all data
-    for table in ["audit_events", "risk_assessments", "investigations", "findings",
-                   "dependencies", "scans", "repositories", "github_installations", "users"]:
+    # Clean ONLY this seeder's own fixture scope. This script owns the
+    # fixed key 911111 and must coexist with tests/setup_e2e.py, whose
+    # users/repos (keys 111111/222222/333333/...) it must never delete —
+    # a blanket wipe here destroyed the e2e seed data and broke the
+    # real-stack/approval specs. FK-safe order for this scope only.
+    for stmt in [
+        """DELETE FROM audit_events WHERE repository_id IN (SELECT id FROM repositories
+              WHERE installation_id IN (SELECT id FROM github_installations
+              WHERE installation_id = 911111))""",
+        """DELETE FROM rollback_runs WHERE git_remediation_id IN (SELECT id FROM git_remediations
+              WHERE execution_run_id IN (SELECT id FROM execution_runs WHERE authorization_id IN
+              (SELECT id FROM execution_authorizations WHERE repository_id IN
+              (SELECT id FROM repositories WHERE installation_id IN
+              (SELECT id FROM github_installations WHERE installation_id = 911111)))))""",
+        """DELETE FROM verification_checks WHERE verification_run_id IN (SELECT id FROM verification_runs
+              WHERE git_remediation_id IN (SELECT id FROM git_remediations
+              WHERE execution_run_id IN (SELECT id FROM execution_runs WHERE authorization_id IN
+              (SELECT id FROM execution_authorizations WHERE repository_id IN
+              (SELECT id FROM repositories WHERE installation_id IN
+              (SELECT id FROM github_installations WHERE installation_id = 911111))))))""",
+        """DELETE FROM verification_runs WHERE git_remediation_id IN (SELECT id FROM git_remediations
+              WHERE execution_run_id IN (SELECT id FROM execution_runs WHERE authorization_id IN
+              (SELECT id FROM execution_authorizations WHERE repository_id IN
+              (SELECT id FROM repositories WHERE installation_id IN
+              (SELECT id FROM github_installations WHERE installation_id = 911111)))))""",
+        """DELETE FROM github_credential_issuances WHERE git_remediation_id IN (SELECT id FROM git_remediations
+              WHERE execution_run_id IN (SELECT id FROM execution_runs WHERE authorization_id IN
+              (SELECT id FROM execution_authorizations WHERE repository_id IN
+              (SELECT id FROM repositories WHERE installation_id IN
+              (SELECT id FROM github_installations WHERE installation_id = 911111)))))""",
+        """DELETE FROM git_remediations WHERE execution_run_id IN (SELECT id FROM execution_runs
+              WHERE authorization_id IN (SELECT id FROM execution_authorizations
+              WHERE repository_id IN (SELECT id FROM repositories WHERE installation_id IN
+              (SELECT id FROM github_installations WHERE installation_id = 911111))))""",
+        """DELETE FROM execution_runs WHERE authorization_id IN (SELECT id FROM execution_authorizations
+              WHERE repository_id IN (SELECT id FROM repositories WHERE installation_id IN
+              (SELECT id FROM github_installations WHERE installation_id = 911111)))""",
+        """DELETE FROM execution_authorizations WHERE repository_id IN (SELECT id FROM repositories
+              WHERE installation_id IN (SELECT id FROM github_installations
+              WHERE installation_id = 911111))""",
+        """DELETE FROM approvals WHERE proposal_id IN (SELECT id FROM action_proposals
+              WHERE finding_id IN (SELECT id FROM findings WHERE repository_id IN
+              (SELECT id FROM repositories WHERE installation_id IN
+              (SELECT id FROM github_installations WHERE installation_id = 911111))))""",
+        """DELETE FROM action_proposals WHERE finding_id IN (SELECT id FROM findings
+              WHERE repository_id IN (SELECT id FROM repositories WHERE installation_id IN
+              (SELECT id FROM github_installations WHERE installation_id = 911111)))""",
+        """DELETE FROM risk_assessments WHERE finding_id IN (SELECT id FROM findings
+              WHERE repository_id IN (SELECT id FROM repositories WHERE installation_id IN
+              (SELECT id FROM github_installations WHERE installation_id = 911111)))""",
+        """DELETE FROM investigations WHERE finding_id IN (SELECT id FROM findings
+              WHERE repository_id IN (SELECT id FROM repositories WHERE installation_id IN
+              (SELECT id FROM github_installations WHERE installation_id = 911111)))""",
+        """DELETE FROM recommendations WHERE finding_id IN (SELECT id FROM findings
+              WHERE repository_id IN (SELECT id FROM repositories WHERE installation_id IN
+              (SELECT id FROM github_installations WHERE installation_id = 911111)))""",
+        """DELETE FROM findings WHERE repository_id IN (SELECT id FROM repositories
+              WHERE installation_id IN (SELECT id FROM github_installations
+              WHERE installation_id = 911111))""",
+        """DELETE FROM dependencies WHERE scan_id IN (SELECT id FROM scans
+              WHERE repository_id IN (SELECT id FROM repositories WHERE installation_id IN
+              (SELECT id FROM github_installations WHERE installation_id = 911111)))""",
+        """DELETE FROM scans WHERE repository_id IN (SELECT id FROM repositories
+              WHERE installation_id IN (SELECT id FROM github_installations
+              WHERE installation_id = 911111))""",
+        """DELETE FROM repositories WHERE installation_id IN (SELECT id FROM
+              github_installations WHERE installation_id = 911111)""",
+        "DELETE FROM github_installations WHERE installation_id = 911111",
+    ]:
         try:
-            cur.execute(f"DELETE FROM {table}")
+            cur.execute(stmt)
         except Exception:
             pass
 
@@ -74,18 +140,20 @@ def setup():
         (user_id, email, github_id, "golden-user"),
     )
 
-    # Create installation
+    # Create installation — disjoint fixture keys (911111/922222,
+    # 'golden-cert-org') so this seeder never collides with
+    # tests/setup_e2e.py, which owns 111111/222222/'golden-org'.
     installation_id = str(uuid4())
     cur.execute(
         "INSERT INTO github_installations (id, user_id, installation_id, account_login, account_type) VALUES (%s, %s, %s, %s, %s)",
-        (installation_id, user_id, 111111, "golden-org", "Organization"),
+        (installation_id, user_id, 911111, "golden-cert-org", "Organization"),
     )
 
     # Create repository (pointing to vulnerable-node-app fixture)
     repo_id = str(uuid4())
     cur.execute(
         "INSERT INTO repositories (id, installation_id, github_repo_id, owner, name, default_branch, is_active) VALUES (%s, %s, %s, %s, %s, %s, true)",
-        (repo_id, installation_id, 222222, "golden-org", "vulnerable-node-app", "main"),
+        (repo_id, installation_id, 922222, "golden-cert-org", "vulnerable-node-app", "main"),
     )
 
     # Create session

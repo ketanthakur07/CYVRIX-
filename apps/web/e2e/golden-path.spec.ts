@@ -140,8 +140,8 @@ test.describe("Golden Path — Full Pipeline", () => {
     // Step 3: Verify repository is active
     await expect(page.locator("text=Active")).toBeVisible();
 
-    // Step 4: Click "Run Scan" button
-    const scanButton = page.locator("button:has-text('Run Scan')");
+    // Step 4: Click the Scan button (renders as "Scan" with an icon)
+    const scanButton = page.getByRole("button", { name: "Scan", exact: true });
     await expect(scanButton).toBeVisible();
     await expect(scanButton).toBeEnabled();
     await scanButton.click();

@@ -55,10 +55,64 @@ def setup():
 
     result = {"users": {}, "cleanup_ids": []}
 
+    # Idempotency: remove leftovers of previous runs keyed on the FIXED
+    # installation/repo ids below, so the script can be re-run against a
+    # warm database without UniqueViolation failures.
+    # FK-safe cascade over the FIXED fixture scope. Covers V1..V3.6
+    # tables in dependency order — the previous partial ordering deleted
+    # installations before their repositories (FK violation on warm DBs).
+    repo_scope = """
+        SELECT id FROM repositories WHERE github_repo_id IN (222222, 222223, 444444, 666666)
+        OR owner = 'golden-org'
+        OR installation_id IN (SELECT id FROM github_installations WHERE
+            installation_id IN (111111, 333333, 555555))
+    """
+    remediation_scope = f"""
+        SELECT id FROM git_remediations WHERE execution_run_id IN (
+            SELECT id FROM execution_runs WHERE execution_authorization_id IN (
+                SELECT id FROM execution_authorizations WHERE repository_id IN ({repo_scope})))
+    """
+    finding_scope = f"""
+        SELECT id FROM findings WHERE repository_id IN ({repo_scope})
+    """
+    scan_scope = f"""
+        SELECT id FROM scans WHERE repository_id IN ({repo_scope})
+    """
+    for stmt in [
+        f"DELETE FROM audit_events WHERE repository_id IN ({repo_scope})",
+        f"""DELETE FROM rollback_runs WHERE git_remediation_id IN ({remediation_scope})""",
+        f"""DELETE FROM verification_checks WHERE verification_run_id IN (
+            SELECT id FROM verification_runs WHERE git_remediation_id IN ({remediation_scope}))""",
+        f"""DELETE FROM verification_runs WHERE git_remediation_id IN ({remediation_scope})""",
+        f"""DELETE FROM github_credential_issuances WHERE git_remediation_id IN ({remediation_scope})""",
+        f"""DELETE FROM git_remediations WHERE execution_run_id IN (
+            SELECT id FROM execution_runs WHERE execution_authorization_id IN (
+                SELECT id FROM execution_authorizations WHERE repository_id IN ({repo_scope})))""",
+        f"""DELETE FROM workspace_snapshots WHERE execution_run_id IN (
+            SELECT id FROM execution_runs WHERE execution_authorization_id IN (
+                SELECT id FROM execution_authorizations WHERE repository_id IN ({repo_scope})))""",
+        f"""DELETE FROM execution_runs WHERE execution_authorization_id IN (
+            SELECT id FROM execution_authorizations WHERE repository_id IN ({repo_scope}))""",
+        f"""DELETE FROM execution_authorizations WHERE repository_id IN ({repo_scope})""",
+        f"""DELETE FROM approvals WHERE action_proposal_id IN (
+            SELECT id FROM action_proposals WHERE finding_id IN ({finding_scope}))""",
+        f"""DELETE FROM action_proposals WHERE finding_id IN ({finding_scope})""",
+        f"""DELETE FROM risk_assessments WHERE finding_id IN ({finding_scope})""",
+        f"""DELETE FROM investigations WHERE finding_id IN ({finding_scope})""",
+        f"""DELETE FROM recommendations WHERE finding_id IN ({finding_scope})""",
+        f"""DELETE FROM findings WHERE id IN ({finding_scope})""",
+        f"""DELETE FROM dependencies WHERE scan_id IN ({scan_scope})""",
+        f"""DELETE FROM scans WHERE id IN ({scan_scope})""",
+        f"""DELETE FROM repositories WHERE id IN ({repo_scope})""",
+        "DELETE FROM github_installations WHERE installation_id IN (111111, 333333, 555555) "
+        "OR account_login IN ('golden-org', 'idor-a-org', 'idor-b-org', 'xss-org')",
+    ]:
+        cur.execute(stmt)
+
     # --- Golden Path User ---
     golden_user_id = str(uuid4())
-    golden_email = f"golden-{int(time.time())}@cyvrix.test"
-    golden_github_id = int(time.time()) % 900000 + 100000
+    golden_email = f"golden-{int(time.time()*1000)}-{uuid4().hex[:6]}@cyvrix.test"
+    golden_github_id = uuid4().int % 900000 + 100000
 
     cur.execute(
         "INSERT INTO users (id, email, github_id, github_login) VALUES (%s, %s, %s, %s)",
@@ -75,7 +129,10 @@ def setup():
 
     cur.execute(
         "INSERT INTO github_installations (id, user_id, installation_id, account_login, account_type) VALUES (%s, %s, %s, %s, %s)",
-        (golden_inst_id, golden_user_id, 111111, "golden-org", "Organization")
+        # Dynamic installation id: 111111 is owned by setup_golden_path.py
+        # (its spec reads golden_path_setup.json). Sharing the fixed key
+        # made the two seeders overwrite each other's repository row.
+        (golden_inst_id, golden_user_id, 700000 + uuid4().int % 90000, "golden-org", "Organization")
     )
     cur.execute(
         "INSERT INTO repositories (id, installation_id, github_repo_id, owner, name, default_branch, is_active) VALUES (%s, %s, %s, %s, %s, %s, true)",
@@ -105,10 +162,10 @@ def setup():
 
     # --- IDOR User A ---
     user_a_id = str(uuid4())
-    user_a_email = f"idor-a-{int(time.time())}@cyvrix.test"
+    user_a_email = f"idor-a-{uuid4().hex[:10]}-{int(time.time())}@cyvrix.test"
     cur.execute(
         "INSERT INTO users (id, email, github_id, github_login) VALUES (%s, %s, %s, %s)",
-        (user_a_id, user_a_email, int(time.time()) % 900000 + 200000, "idor-user-a")
+        (user_a_id, user_a_email, uuid4().int % 900000 + 200000, "idor-user-a")
     )
     _, _, user_a_cookie = create_session_cookie(user_a_id)
     result["cleanup_ids"].append(user_a_id)
@@ -145,10 +202,10 @@ def setup():
 
     # --- IDOR User B ---
     user_b_id = str(uuid4())
-    user_b_email = f"idor-b-{int(time.time())}@cyvrix.test"
+    user_b_email = f"idor-b-{uuid4().hex[:10]}-{int(time.time())}@cyvrix.test"
     cur.execute(
         "INSERT INTO users (id, email, github_id, github_login) VALUES (%s, %s, %s, %s)",
-        (user_b_id, user_b_email, int(time.time()) % 900000 + 300000, "idor-user-b")
+        (user_b_id, user_b_email, uuid4().int % 900000 + 300000, "idor-user-b")
     )
     _, _, user_b_cookie = create_session_cookie(user_b_id)
     result["cleanup_ids"].append(user_b_id)
@@ -161,10 +218,10 @@ def setup():
 
     # --- XSS User ---
     xss_user_id = str(uuid4())
-    xss_email = f"xss-{int(time.time())}@cyvrix.test"
+    xss_email = f"xss-{uuid4().hex[:10]}-{int(time.time())}@cyvrix.test"
     cur.execute(
         "INSERT INTO users (id, email, github_id, github_login) VALUES (%s, %s, %s, %s)",
-        (xss_user_id, xss_email, int(time.time()) % 900000 + 400000, "xss-user")
+        (xss_user_id, xss_email, uuid4().int % 900000 + 400000, "xss-user")
     )
     _, _, xss_cookie = create_session_cookie(xss_user_id)
     result["cleanup_ids"].append(xss_user_id)
@@ -203,10 +260,10 @@ def setup():
 
     # --- Empty User (no data) ---
     empty_user_id = str(uuid4())
-    empty_email = f"empty-{int(time.time())}@cyvrix.test"
+    empty_email = f"empty-{uuid4().hex[:10]}-{int(time.time())}@cyvrix.test"
     cur.execute(
         "INSERT INTO users (id, email, github_id, github_login) VALUES (%s, %s, %s, %s)",
-        (empty_user_id, empty_email, int(time.time()) % 900000 + 500000, "empty-user")
+        (empty_user_id, empty_email, uuid4().int % 900000 + 500000, "empty-user")
     )
     _, _, empty_cookie = create_session_cookie(empty_user_id)
     result["cleanup_ids"].append(empty_user_id)

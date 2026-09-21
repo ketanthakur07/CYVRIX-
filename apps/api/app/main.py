@@ -15,6 +15,7 @@ from app.routes import container, recommendations, reports
 from app.routes import actions, approvals
 from app.routes import execution_authorization
 from app.routes import execution_runs
+from app.routes import git_remediation
 from app.session import get_redis, close_redis
 import logging
 
@@ -92,6 +93,16 @@ app.include_router(execution_authorization.router)
 # one V3.3 authorization; isolated, bounded, non-publishing; NO Git/
 # GitHub writes, NO PRs, NO deployments)
 app.include_router(execution_runs.router)
+
+# Include V3.5 router (controlled Git/GitHub remediation — branch/commit/
+# push/PR after server-verified runs; exactly-once per run; service-identity
+# pipeline execution; short-lived repo-scoped credentials; NO force push,
+# NO default-branch push)
+app.include_router(git_remediation.router)
+
+# CYVRIX V3.6 — verification + rollback
+from app.routes import verification_rollback as verification_rollback  # noqa: E402
+app.include_router(verification_rollback.router)
 
 
 @app.get("/api/health/live")

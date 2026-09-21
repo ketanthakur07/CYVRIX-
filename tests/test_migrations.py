@@ -25,12 +25,24 @@ from app.models import (
 )
 
 
-TEST_MIGRATION_DB_URL = "sqlite+aiosqlite:///test_migration.db"
+# Defaults to SQLite for fast CI; set MIGRATION_TEST_DB_URL to run this
+# identical suite against real PostgreSQL (environment certification).
+TEST_MIGRATION_DB_URL = os.environ.get(
+    "MIGRATION_TEST_DB_URL", "sqlite+aiosqlite:///test_migration.db")
+
+# asyncpg connections bind to the event loop that created them. A module-
+# scoped engine with the default QueuePool would hand a stale-loop pooled
+# connection to the next test's loop ("attached to a different loop").
+# NullPool forces a fresh connection per checkout — same pattern the race
+# suites use for their real-PG engines.
+from sqlalchemy.pool import NullPool as _NullPool
+
+_ENGINE_KWARGS = {} if "sqlite" in TEST_MIGRATION_DB_URL else {"poolclass": _NullPool}
 
 
 @pytest.fixture(scope="module")
 async def engine():
-    eng = create_async_engine(TEST_MIGRATION_DB_URL)
+    eng = create_async_engine(TEST_MIGRATION_DB_URL, **_ENGINE_KWARGS)
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield eng
