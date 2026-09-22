@@ -1138,7 +1138,14 @@ class TestNoExecutionBoundary:
         from server-verified run state; the pipeline runs exclusively via
         the service-identity-gated POST /api/executor/remediations/{id}/execute
         ("execute" in its path, which the check below still refuses for any
-        user-reachable route by construction: it lives under /api/executor/)."""
+        user-reachable route by construction: it lives under /api/executor/).
+
+        V3.7 adds the operator control plane (POST /api/ops/reconciliation/run),
+        which triggers a reconciliation pass. Reconciliation starts no
+        execution and grants no authority — it classifies externally-visible
+        state and emits operational events only (see
+        app/services/reconciliation_service.py) — so it is an explicit
+        trigger-only POST exception below."""
         proposal = await seed_proposal(
             session_factory, test_repository, proposer_id=test_user.id,
         )
@@ -1147,6 +1154,7 @@ class TestNoExecutionBoundary:
         INTERNAL_ADMISSION_PATH = "/api/executor/runs"  # service identity only
         V35_INTERNAL_PIPELINE_PATH = "/api/executor/remediations"  # service only
         USER_REMEDIATION_START = "/api/actions/runs/{run_id}/remediation"
+        V37_OPERATOR_RECONCILIATION = "/api/ops/reconciliation/run"
         for r in app.routes:
             path = getattr(r, "path", "")
             run_path = path.replace("step-up", "")
@@ -1167,6 +1175,16 @@ class TestNoExecutionBoundary:
                     # test_git_remediation.py; the pipeline is service-only).
                     assert methods <= {"POST", "GET"}, (
                         f"remediation route must be start/read-only: "
+                        f"{path} has {sorted(methods)}"
+                    )
+                elif path == V37_OPERATOR_RECONCILIATION:
+                    # V3.7: the operator control plane may trigger a
+                    # reconciliation pass. It starts no execution and grants
+                    # no authority — it only classifies externally-visible
+                    # state and emits operational events. Trigger-only POST;
+                    # no method may widen.
+                    assert methods <= {"POST"}, (
+                        f"reconciliation route must be trigger-only: "
                         f"{path} has {sorted(methods)}"
                     )
                 else:

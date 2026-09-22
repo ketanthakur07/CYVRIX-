@@ -71,6 +71,18 @@ async def issue_push_token(
         )
         return None, ks_reason or grm.RC_KILL_SWITCH_ACTIVE
 
+    # 0b. V3.7: no NEW credential issuance unless the system is NORMAL
+    #     (PAUSED/DRAINING/EMERGENCY_STOP forbid new external mutations;
+    #     EMERGENCY_STOP additionally blocks any in-flight pipeline from
+    #     obtaining fresh push capability).
+    from app.services import ops_service
+    state, state_fail = await ops_service.read_operational_state(db)
+    if state is None or state != "NORMAL":
+        reason = state_fail or "SYSTEM_NOT_NORMAL"
+        await _record_denial(db, remediation_row=remediation_row,
+                             reason_code=reason, purpose=purpose)
+        return None, reason
+
     # 1. Token endpoint must be allowlisted (SSRF defense, Phase 28).
     if not _token_endpoint_allowlisted():
         await _record_denial(db, remediation_row=remediation_row,

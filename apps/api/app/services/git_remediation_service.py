@@ -156,6 +156,16 @@ async def start_remediation(
         raise RemediationDenied(
             ks_reason or grm.RC_KILL_SWITCH_ACTIVE, "kill switch active")
 
+    # 0b. V3.7 operational gate: system state × repository control ×
+    # circuit breaker × quotas. Fail closed on any unknown state.
+    from app.services import ops_service
+    ops_ok, ops_reason = await ops_service.assert_execution_allowed(
+        db, repository_id=run.repository_id, scope="REMEDIATION",
+        action_type=None, now=now,
+    )
+    if not ops_ok:
+        raise RemediationDenied(ops_reason or "OPS_GATE_DENIED", "operational control active")
+
     # 1. The run must be a SERVER-VERIFIED successful local execution.
     if run is None:
         raise RemediationDenied(grm.RC_RUN_NOT_FOUND)
@@ -616,6 +626,15 @@ async def execute_remediation(
         if disabled:
             return await _fail(ks_reason or grm.RC_KILL_SWITCH_ACTIVE,
                                "kill switch active (verify)")
+
+        # V3.7: pause/drain takes effect at stage boundaries too —
+        # DRAINING stops the pipeline before the next external effect.
+        from app.services import ops_service as _ops
+        _ops_state, _ops_fail = await _ops.read_operational_state(db)
+        if _ops_state == "DRAINING":
+            return await _fail("SYSTEM_DRAINING", "drain requested at stage boundary")
+        if _ops_state is None:
+            return await _fail(_ops_fail or "OPS_STATE_UNREADABLE", "operational state unreadable")
 
         # Reconstruct + prove content (sandboxed; fail closed on mismatch)
         reconstructed = await _reconstruct_verified_content(

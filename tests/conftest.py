@@ -36,10 +36,22 @@ async def engine():
 
 @pytest.fixture(autouse=True)
 async def clean_db(engine):
-    """Clean all tables between tests."""
+    """Clean all tables between tests, then provision the V3.7
+    operational_state control row exactly as migration 010 does in
+    production. (execution_disabled continues to be seeded by the tests
+    that exercise kill-switch-gated paths, as in V3.3–V3.6.)
+
+    Services still fail closed when rows are missing/unreadable —
+    tests that exercise those paths delete the rows explicitly."""
+    from app.models import SystemControl
     async with engine.begin() as conn:
         for table in reversed(Base.metadata.sorted_tables):
             await conn.execute(table.delete())
+        await conn.execute(
+            __import__("sqlalchemy").insert(SystemControl).values(
+                {"key": "operational_state", "value": "NORMAL"},
+            )
+        )
     yield
 
 

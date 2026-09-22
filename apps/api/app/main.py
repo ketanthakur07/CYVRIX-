@@ -16,6 +16,7 @@ from app.routes import actions, approvals
 from app.routes import execution_authorization
 from app.routes import execution_runs
 from app.routes import git_remediation
+from app.routes import ops as ops
 from app.session import get_redis, close_redis
 import logging
 
@@ -32,6 +33,15 @@ async def lifespan(app: FastAPI):
         if settings.is_production:
             raise
         logger.warning("Database connection check failed (non-production): %s", str(e)[:200])
+
+    # V3.7: validate operational configuration — fail closed in
+    # production on invalid security-sensitive settings.
+    from app.services.ops_service import validate_ops_configuration
+    ops_fail = validate_ops_configuration(settings)
+    if ops_fail and settings.is_production:
+        raise RuntimeError(f"Invalid operational configuration: {ops_fail}")
+    if ops_fail:
+        logger.warning("Operational configuration invalid (non-production): %s", ops_fail)
 
     # Initialize Redis connection
     try:
@@ -54,6 +64,22 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan,
 )
+
+
+# V3.7 observability: per-request correlation id (Phase 27).
+# Bounded, secret-free; the client MAY supply x-request-id, the server
+# always decides what it stores. Response header aids operator triage.
+@app.middleware("http")
+async def request_id_middleware(request, call_next):
+    import uuid as _uuid
+
+    supplied = (request.headers.get("x-request-id") or "")[:64]
+    safe_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+    request_id = supplied if supplied and set(supplied) <= safe_chars else _uuid.uuid4().hex[:16]
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["x-request-id"] = request_id
+    return response
 
 # CORS — only configured origins, no wildcard credentials
 app.add_middleware(
@@ -104,16 +130,24 @@ app.include_router(git_remediation.router)
 from app.routes import verification_rollback as verification_rollback  # noqa: E402
 app.include_router(verification_rollback.router)
 
+# Include V3.7 router (operational control plane — operator API only.
+# Controls the platform; NEVER authorizes a remediation: every gate
+# here fails closed and no capability bypasses V3.1–V3.6 security)
+app.include_router(ops.router)
+
 
 @app.get("/api/health/live")
 async def liveness():
-    """Liveness probe: API is running."""
+    """Liveness probe: API is running (no dependency info exposed)."""
     return {"status": "alive", "version": "2.0.0"}
 
 
 @app.get("/api/health/ready")
 async def readiness():
-    """Readiness probe: verify DB and Redis connectivity."""
+    """Readiness probe: verify DB and Redis connectivity.
+
+    A service may be alive but not ready; dependency failures here are
+    reported as booleans only (no internal details exposed)."""
     from app.database import check_db_health
 
     checks = {}

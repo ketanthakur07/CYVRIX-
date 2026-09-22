@@ -144,6 +144,18 @@ async def start_rollback(
         raise RollbackDenied(
             ks_reason or vm.RC_KILL_SWITCH_ACTIVE, "kill switch active")
 
+    # 0b. V3.7 operational gate: a rollback is a GitHub mutation, so
+    # PAUSED/DRAINING/EMERGENCY_STOP all block NEW rollback initiation
+    # (an already-running rollback is reconciled, not abandoned).
+    from app.services import ops_service
+    repo_id = getattr(remediation, "repository_id", None)
+    if repo_id is not None:
+        ops_ok, ops_reason = await ops_service.assert_rollback_allowed(
+            db, repository_id=repo_id, now=now)
+        if not ops_ok:
+            raise RollbackDenied(ops_reason or "OPS_GATE_DENIED",
+                                 "operational control active")
+
     # 1. The push must actually have happened (Phase 14: rollback of a
     #    local-only commit is a workspace delete, not a rollback record)
     if remediation is None:

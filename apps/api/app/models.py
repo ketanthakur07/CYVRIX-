@@ -25,6 +25,7 @@ class User(Base):
     email = Column(Text, unique=True, nullable=False)
     github_id = Column(Integer, unique=True, nullable=True)
     github_login = Column(Text, nullable=True)
+    role = Column(Text, nullable=False, server_default="USER", default="USER")  # USER|OPERATOR|ADMIN
     created_at = Column(DateTime(timezone=True), default=utcnow)
 
     installations = relationship("GithubInstallation", back_populates="user")
@@ -796,6 +797,154 @@ class RollbackRun(Base):
         ),
         Index("ix_rollback_runs_state", "rollback_state"),
         Index("ix_rollback_runs_repo", "repository_id"),
+    )
+
+
+class RepositoryControl(Base):
+    """V3.7 — per-repository operational control (tenant-owned).
+
+    One row per repository. ENABLED is the only state that permits new
+    execution/mutation for the repo. PAUSED contains the repo while
+    preserving verification (read-only) work; BLOCKED stops everything.
+    Only authorized operators may change it; clients can never select or
+    set arbitrary repository controls. Unknown/missing state fails closed
+    in the services that consult it.
+    """
+
+    __tablename__ = "repository_controls"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    repository_id = Column(
+        UUID(as_uuid=True), ForeignKey("repositories.id"), nullable=False, unique=True
+    )
+    control_state = Column(Text, nullable=False, default="ENABLED")  # ENABLED|PAUSED|BLOCKED
+    reason = Column(Text)  # bounded, non-secret
+    updated_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        Index("ix_repository_controls_state", "control_state"),
+    )
+
+
+class CircuitBreaker(Base):
+    """V3.7 — per-repository, per-scope circuit breaker.
+
+    Bounded consecutive failures open the breaker; only an explicit
+    operator reset closes it again. OPEN denies new automatic execution
+    for that (repository, scope, action_type). Unprovisioned/unknown
+    state fails closed.
+    """
+
+    __tablename__ = "circuit_breakers"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    repository_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id"), nullable=False)
+    scope = Column(Text, nullable=False)  # EXECUTION|REMEDIATION|VERIFICATION|ROLLBACK
+    action_type = Column(Text, nullable=False, server_default="ANY")
+    breaker_state = Column(Text, nullable=False, default="CLOSED")  # CLOSED|OPEN
+    consecutive_failures = Column(Integer, nullable=False, server_default="0", default=0)
+    max_consecutive_failures = Column(Integer, nullable=False, server_default="3", default=3)
+    opened_at = Column(DateTime(timezone=True))
+    opened_reason_code = Column(Text)
+    reset_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("repository_id", "scope", "action_type", name="uq_circuit_breakers_scope"),
+        Index("ix_circuit_breakers_state", "breaker_state"),
+    )
+
+
+class ExecutionLease(Base):
+    """V3.7 — explicit job ownership for long-running pipelines.
+
+    At most one ACTIVE lease per subject. A lease records the owner,
+    the attempt, a heartbeat and an expiry. Expired leases never authorize
+    anything by themselves: recovery goes through the reconciliation
+    engine, which reconciles external state before any retry. Lease rows
+    are diagnostic + coordination data — never authorization material.
+    """
+
+    __tablename__ = "execution_leases"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    subject_type = Column(Text, nullable=False)  # GIT_REMEDIATION|ROLLBACK|EXECUTION_RUN
+    subject_id = Column(UUID(as_uuid=True), nullable=False)
+    repository_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id"), nullable=False)
+    lease_owner_id = Column(Text, nullable=False)  # worker/executor identity, not a user
+    attempt = Column(Integer, nullable=False, server_default="1", default=1)
+    lease_state = Column(Text, nullable=False, default="ACTIVE")  # ACTIVE|EXPIRED|RELEASED
+    heartbeat_at = Column(DateTime(timezone=True), default=utcnow)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        Index(
+            "uq_execution_leases_active",
+            "subject_id",
+            unique=True,
+            postgresql_where=text("lease_state = 'ACTIVE'"),
+            sqlite_where=text("lease_state = 'ACTIVE'"),
+        ),
+        Index("ix_execution_leases_state", "lease_state"),
+        Index("ix_execution_leases_subject", "subject_type", "subject_id"),
+    )
+
+
+class ReconciliationRun(Base):
+    """V3.7 — one deterministic, idempotent reconciliation pass.
+
+    Records what the engine inspected and what it decided (counts and
+    bounded findings). Reconciliation never mutates repositories and
+    never authorizes anything; it classifies state and marks rows for
+    operator-visible recovery.
+    """
+
+    __tablename__ = "reconciliation_runs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    trigger = Column(Text, nullable=False, default="OPERATOR")  # OPERATOR|STARTUP|PERIODIC
+    status = Column(Text, nullable=False, default="RUNNING")  # RUNNING|COMPLETED|FAILED
+    findings = Column(JSONB)  # bounded list of {subject, classification, reason}
+    stats = Column(JSONB)     # bounded counters (inspected/reconciled/orphans)
+    detail = Column(Text)     # bounded failure detail when FAILED
+    started_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    finished_at = Column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_reconciliation_runs_status", "status"),
+    )
+
+
+class OperationalEvent(Base):
+    """V3.7 — operational audit event (Phase 47).
+
+    Structured, secret-free operational telemetry: state transitions,
+    circuit changes, lease expiry, reconciliation results, quota denials.
+    Complements audit_events (remediation security events) — never
+    replaces them. V3.8's immutable chain remains future work.
+    """
+
+    __tablename__ = "operational_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    event_type = Column(Text, nullable=False)
+    repository_id = Column(UUID(as_uuid=True))
+    subject_type = Column(Text)  # REMEDIATION|ROLLBACK|RUN|BREAKER|LEASE|...
+    subject_id = Column(UUID(as_uuid=True))
+    reason_code = Column(Text)
+    detail = Column(Text)        # bounded, non-secret
+    created_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        Index("ix_operational_events_type", "event_type"),
+        Index("ix_operational_events_created", "created_at"),
     )
 
 

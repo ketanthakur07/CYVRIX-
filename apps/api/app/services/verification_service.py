@@ -616,6 +616,18 @@ async def start_verification(
         raise VerificationDenied(
             ks_reason or vm.RC_KILL_SWITCH_ACTIVE, "kill switch active")
 
+    # 0b. V3.7 operational gate: verification is read-only regarding the
+    # repository, so it is allowed under PAUSED (containment preserves
+    # evidence) but blocked under BLOCKED/EMERGENCY_STOP/unknown state.
+    from app.services import ops_service
+    repo_id = getattr(remediation, "repository_id", None)
+    if repo_id is not None:
+        ops_ok, ops_reason = await ops_service.assert_verification_allowed(
+            db, repository_id=repo_id)
+        if not ops_ok:
+            raise VerificationDenied(ops_reason or "OPS_GATE_DENIED",
+                                     "operational control active")
+
     # 1. The remediation must have a committed SHA (verification target)
     if remediation is None:
         raise VerificationDenied(vm.RC_VERIFICATION_NOT_FOUND)

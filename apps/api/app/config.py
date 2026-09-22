@@ -55,6 +55,15 @@ class Settings(BaseSettings):
     executor_service_token: str = ""  # service identity for the internal executor API
     execution_admission_rate_limit_per_hour: int = 10
 
+    # V3.7 operational controls (server-owned; clients can never raise them)
+    ops_max_concurrent_executions: int = 5
+    ops_max_concurrent_executions_per_repository: int = 2
+    ops_max_execution_duration_seconds: int = 900
+    ops_lease_ttl_seconds: int = 120
+    ops_breaker_max_failures: int = 3
+    ops_rate_limit_per_hour: int = 30
+    ops_reconciliation_rate_limit_per_hour: int = 10
+
     # Scan limits
     max_repo_size_mb: int = 500
     scan_timeout_minutes: int = 10
@@ -107,6 +116,38 @@ class Settings(BaseSettings):
                 )
             if len(v) < 32:
                 raise ValueError("SECRET_KEY must be at least 32 characters in production.")
+        return v
+
+    @field_validator(
+        "ops_max_concurrent_executions",
+        "ops_max_concurrent_executions_per_repository",
+        "ops_max_execution_duration_seconds",
+        "ops_lease_ttl_seconds",
+        "ops_breaker_max_failures",
+        "ops_rate_limit_per_hour",
+        "ops_reconciliation_rate_limit_per_hour",
+    )
+    @classmethod
+    def validate_ops_limits_positive(cls, v: int, info) -> int:
+        """V3.7: operational limits must be bounded positive integers.
+
+        Fail closed at startup: there is no representation for
+        'unlimited' — a non-positive or absurd value stops startup."""
+        bounds = {
+            "ops_max_concurrent_executions": (1, 10_000),
+            "ops_max_concurrent_executions_per_repository": (1, 1_000),
+            "ops_max_execution_duration_seconds": (1, 86_400),
+            "ops_lease_ttl_seconds": (10, 3_600),
+            "ops_breaker_max_failures": (1, 100),
+            "ops_rate_limit_per_hour": (1, 1_000),
+            "ops_reconciliation_rate_limit_per_hour": (1, 1_000),
+        }
+        low, high = bounds[info.field_name]
+        if not isinstance(v, int) or v < low or v > high:
+            raise ValueError(
+                f"{info.field_name} must be between {low} and {high} "
+                "(operational limits are bounded; unlimited is not supported)"
+            )
         return v
 
     @field_validator("debug")
