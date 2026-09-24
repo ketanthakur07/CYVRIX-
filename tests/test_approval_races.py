@@ -94,10 +94,19 @@ async def session_factory(real_engine):
 async def clean_db(real_engine):
     """Wipe ALL tables between tests. Dedicated test database only."""
     from app.database import Base
+    from app.models import SystemControl
 
     async with real_engine.begin() as conn:
         for table in reversed(Base.metadata.sorted_tables):
             await conn.execute(table.delete())
+        # V3.7: provision the operational_state row exactly as migration
+        # 010 does in production (fail-closed parity; the ops gate's
+        # missing/unreadable fail-closed behavior has dedicated tests).
+        await conn.execute(
+            SystemControl.__table__.insert().values(
+                key="operational_state", value="NORMAL"
+            )
+        )
     yield
 
 

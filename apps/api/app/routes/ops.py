@@ -227,15 +227,8 @@ async def _resume_gate(db: AsyncSession) -> tuple[bool, Optional[str]]:
     """Resume (→ NORMAL) requires a recent COMPLETED reconciliation pass
     with zero UNKNOWN/INCONSISTENT findings and no stuck executions.
     Fail closed: no recent reconciliation ⇒ refuse resume."""
-    rows = (
-        await db.execute(
-            select(OperationalEvent)
-            .where(OperationalEvent.event_type == "JOB_RECONCILED")
-            .order_by(OperationalEvent.created_at.desc())
-            .limit(50)
-        )
-    ).scalar_one_or_none()
-    # Prefer the reconciliation_runs table when present
+    # reconciliation_runs is the authoritative reconciliation record (the
+    # operational_events feed is diagnostics, not a decision input).
     from app.models import ReconciliationRun
     last = (
         await db.execute(

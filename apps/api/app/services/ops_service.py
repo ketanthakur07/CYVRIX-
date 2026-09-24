@@ -362,6 +362,12 @@ async def reset_circuit(
         detail="operator reset",
         actor=actor,
     )
+    try:
+        await db.commit()  # durable reset — never report success on a
+    except Exception as exc:  # transaction the caller may roll back
+        await db.rollback()
+        logger.warning("reset_circuit_commit_failed err=%s", type(exc).__name__)
+        return False, f"{om.RC_OPS_READ_FAILED}:{type(exc).__name__}"
     return True, None
 
 
@@ -435,6 +441,12 @@ async def set_repository_control(
         detail=(reason or "")[:120],
         actor=actor,
     )
+    try:
+        await db.commit()  # durable containment change — never report
+    except Exception as exc:  # success on a transaction the caller rolls back
+        await db.rollback()
+        logger.warning("set_repository_control_commit_failed err=%s", type(exc).__name__)
+        return False, f"{om.RC_OPS_READ_FAILED}:{type(exc).__name__}"
     return True, None
 
 

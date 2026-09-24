@@ -66,7 +66,9 @@ def classify_failure_for_retry(exc: Exception) -> str:
     return "NON_TRANSIENT"
 
 
-# ── Dead-letter handling (Phase 16) ──────────────────────────────────
+# ── Dead-letter handling (Phase 16) ──────────────────────────────
+
+DEAD_LETTER_MAX_ENTRIES = 1000  # bounded retention per dead-letter queue
 
 
 def dead_letter_queue_name(queue: str) -> str:
@@ -77,9 +79,14 @@ def move_to_dead_letter(job, queue: str, reason: str) -> str:
     """Record a permanently-failed job for operator recovery.
 
     Dead-lettered jobs NEVER continue automatically: they land in a
-    separate queue and are retried only by an explicit operator action
-    (out of band, with fresh authorization where applicable). The
-    payload stored is bounded diagnostic metadata — never secrets."""
+    separate queue (dead:<origin>) and are retried only by an explicit
+    operator action (out of band, with fresh authorization where
+    applicable). The payload stored is bounded diagnostic metadata —
+    never secrets. Dead-lettering must never crash the failure path: any
+    transport error is logged and the entry is still returned for the
+    caller's own record. Retention is bounded: the queue is trimmed to
+    the most recent DEAD_LETTER_MAX_ENTRIES entries.
+    """
     import json
 
     entry = {
@@ -93,6 +100,29 @@ def move_to_dead_letter(job, queue: str, reason: str) -> str:
             for a in (getattr(job, "args", None) or [])[:5]
         ],
     }
+    try:
+        from redis import Redis
+        from worker.config import get_settings
+
+        client = Redis.from_url(
+            get_settings().redis_url,
+            socket_connect_timeout=5, socket_timeout=5,
+        )
+        try:
+            dlq = dead_letter_queue_name(queue)
+            pipe = client.pipeline()
+            pipe.rpush(dlq, json.dumps(entry))  # most-recent-last
+            pipe.ltrim(dlq, -DEAD_LETTER_MAX_ENTRIES, -1)  # bounded retention
+            pipe.execute()
+        finally:
+            client.close()
+    except Exception as exc:
+        # Never crash the worker's failure handler on DLQ transport
+        # errors; the job is still parked in RQ's FailedJobRegistry.
+        logger.warning(
+            "dead_letter_enqueue_failed job=%s queue=%s err=%s",
+            str(entry["job_id"])[:20], queue, type(exc).__name__,
+        )
     logger.error(
         "job_dead_lettered job=%s queue=%s reason=%s",
         entry["job_id"][:20], queue, entry["reason"],

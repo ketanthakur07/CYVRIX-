@@ -12,6 +12,7 @@ Covers:
 - rate limiting on ops endpoints (429)
 - no secrets in any response
 """
+import asyncio
 import os
 import sys
 import uuid as uuid_mod
@@ -241,6 +242,41 @@ class TestOneWayDoor:
         r = operator_client.post("/api/ops/state", json={"target": "NORMAL"})
         assert r.status_code == 200
 
+    def test_resume_with_many_reconciled_events_no_500(self, operator_client, session_factory, test_user):
+        """Regression: _resume_gate once scalar_one_or_none()'d a multi-row
+        JOB_RECONCILED event query, turning resume into a 500 as soon as
+        two reconciled events existed (i.e., after the first real
+        reconciliation pass). Resume must evaluate reconciliation_runs
+        and never 500 on a populated audit feed."""
+        import asyncio
+        from app.models import OperationalEvent
+
+        async def _seed_events():
+            async with session_factory() as s:
+                for i in range(3):
+                    s.add(OperationalEvent(
+                        event_type="JOB_RECONCILED",
+                        reason_code="OK",
+                        detail=f"reconciled pass {i}",
+                    ))
+                await s.commit()
+        asyncio.get_event_loop().run_until_complete(_seed_events())
+        _seed_control_state(session_factory, "PAUSED")
+        _seed_reconciliation(session_factory, findings=[])
+        _seed_step_up_for(test_user)
+        r = operator_client.post("/api/ops/state", json={"target": "NORMAL"})
+        assert r.status_code == 200, r.text
+
+    def test_resume_with_multiple_reconciliation_runs_no_500(self, operator_client, session_factory, test_user):
+        """The gate reads reconciliation_runs with limit(1); several past
+        runs must not disturb the decision (no 500, no false refusal)."""
+        _seed_control_state(session_factory, "PAUSED")
+        _seed_reconciliation(session_factory, findings=[])
+        _seed_reconciliation(session_factory, findings=[])
+        _seed_step_up_for(test_user)
+        r = operator_client.post("/api/ops/state", json={"target": "NORMAL"})
+        assert r.status_code == 200, r.text
+
     def test_resume_with_blocking_findings_refused(self, operator_client, session_factory, test_user):
         _seed_control_state(session_factory, "PAUSED")
         _seed_reconciliation(session_factory, findings=[
@@ -307,6 +343,59 @@ class TestAuthorityFieldRejection:
             f"/api/ops/repositories/{test_repository.id}/control",
             json={"control_state": "LAWLESS"})
         assert r.status_code == 422
+
+
+class TestBreakerResetDurability:
+    def test_reset_persists_across_sessions(self, operator_client, session_factory, test_repository, test_user):
+        """Regression: reset_circuit() once returned success without
+        committing; get_db rolled the session back after the response, so
+        the API reported CLOSED while the breaker stayed OPEN (false
+        success on a dangerous action). A reset must be durable."""
+        _seed_breaker(session_factory, test_repository)
+        _seed_step_up_for(test_user)
+
+        async def _get_breaker_id():
+            async with session_factory() as s:
+                from sqlalchemy import select
+                return (await s.execute(select(CircuitBreaker))).scalars().first().id
+        breaker_id = asyncio.get_event_loop().run_until_complete(_get_breaker_id())
+
+        r = operator_client.post(f"/api/ops/breakers/{breaker_id}/reset")
+        assert r.status_code == 200, r.text
+
+        # Fresh session: the reset must be committed, not just visible in
+        # the request's rolled-back transaction.
+        async def _read_back():
+            async with session_factory() as s:
+                from sqlalchemy import select
+                row = (await s.execute(
+                    select(CircuitBreaker).where(CircuitBreaker.id == breaker_id)
+                )).scalar_one()
+                return row.breaker_state, row.consecutive_failures
+        state, failures = asyncio.get_event_loop().run_until_complete(_read_back())
+        assert state == "CLOSED" and failures == 0, (state, failures)
+
+    def test_repo_control_persists_across_sessions(self, operator_client, session_factory, test_repository, test_user):
+        """Same class of bug for repository containment: a pause that only
+        lives until the response transaction rolls back is a silent
+        containment bypass. The change must be durable."""
+        _seed_step_up_for(test_user)
+        r = operator_client.post(
+            f"/api/ops/repositories/{test_repository.id}/control",
+            json={"control_state": "PAUSED", "reason": "durability"})
+        assert r.status_code == 200, r.text
+
+        async def _read_back():
+            async with session_factory() as s:
+                from sqlalchemy import select
+                from app.models import RepositoryControl
+                row = (await s.execute(
+                    select(RepositoryControl).where(
+                        RepositoryControl.repository_id == test_repository.id)
+                )).scalar_one()
+                return row.control_state
+        state = asyncio.get_event_loop().run_until_complete(_read_back())
+        assert state == "PAUSED", state
 
 
 class TestRateLimiting:

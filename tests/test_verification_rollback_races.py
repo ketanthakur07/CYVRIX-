@@ -96,6 +96,14 @@ async def clean_db(real_engine):
                 key="execution_disabled", value="false"
             )
         )
+        # V3.7: provision the operational_state row exactly as migration
+        # 010 does in production (fail-closed parity; the ops gate's
+        # missing/unreadable fail-closed behavior has dedicated tests).
+        await conn.execute(
+            SystemControl.__table__.insert().values(
+                key="operational_state", value="NORMAL"
+            )
+        )
     yield
 
 
