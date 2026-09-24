@@ -64,6 +64,14 @@ class Settings(BaseSettings):
     ops_rate_limit_per_hour: int = 30
     ops_reconciliation_rate_limit_per_hour: int = 10
 
+    # V3.8 audit integrity. The checkpoint MAC key is deliberately NOT a
+    # database value: it lives in configuration (outside the attacker's
+    # DB write reach). Empty disables checkpointing (chain stays
+    # tamper-EVIDENT for content/link tampering; tail-truncation
+    # anchoring is then documented as NOT available).
+    audit_checkpoint_key: str = ""
+    audit_alert_rate_limit_per_hour: int = 60
+
     # Scan limits
     max_repo_size_mb: int = 500
     scan_timeout_minutes: int = 10
@@ -126,6 +134,7 @@ class Settings(BaseSettings):
         "ops_breaker_max_failures",
         "ops_rate_limit_per_hour",
         "ops_reconciliation_rate_limit_per_hour",
+        "audit_alert_rate_limit_per_hour",
     )
     @classmethod
     def validate_ops_limits_positive(cls, v: int, info) -> int:
@@ -141,6 +150,7 @@ class Settings(BaseSettings):
             "ops_breaker_max_failures": (1, 100),
             "ops_rate_limit_per_hour": (1, 1_000),
             "ops_reconciliation_rate_limit_per_hour": (1, 1_000),
+            "audit_alert_rate_limit_per_hour": (1, 10_000),
         }
         low, high = bounds[info.field_name]
         if not isinstance(v, int) or v < low or v > high:

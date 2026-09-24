@@ -72,6 +72,14 @@ async def _audit(
         event_type=event_type,
         event_metadata=metadata,
     ))
+    # V3.8: tamper-evident chain append in the SAME transaction.
+    from app.services import audit_service
+    await audit_service.emit_from_legacy_audit(
+        db,
+        repository_id=repository_id,
+        event_type=event_type,
+        metadata=metadata,
+    )
     if commit:
         try:
             await db.commit()

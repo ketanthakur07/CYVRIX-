@@ -1,6 +1,6 @@
 # CYVRIX V3 — Architecture Specification
 
-Status: PARTIAL IMPLEMENTATION. **V3.1 (action model + policy engine) is IMPLEMENTED — see docs/v3-action-model.md. V3.2 (human approval) is IMPLEMENTED — see docs/v3-approval-model.md. V3.3 (execution authorization gate) is IMPLEMENTED — see docs/v3-execution-authorization.md. V3.4 (sandboxed LOCAL structured execution: container-per-execution, non-root, network-off, bounded, host-side scope verification; NO push, NO pull requests, NO rollback) is IMPLEMENTED — see docs/v3-execution-model.md and the V3.4 sections of docs/v3-security-model.md.** Later phases (git operations/push, verification V3.6, rollback V3.7, hash-chained audit V3.8) remain design-only.
+Status: PARTIAL IMPLEMENTATION. **V3.1 (action model + policy engine) is IMPLEMENTED — see docs/v3-action-model.md. V3.2 (human approval) is IMPLEMENTED — see docs/v3-approval-model.md. V3.3 (execution authorization gate) is IMPLEMENTED — see docs/v3-execution-authorization.md. V3.4 (sandboxed LOCAL structured execution: container-per-execution, non-root, network-off, bounded, host-side scope verification; NO push, NO pull requests, NO rollback) is IMPLEMENTED — see docs/v3-execution-model.md and the V3.4 sections of docs/v3-security-model.md. V3.5 (git remediation), V3.6 (verification), V3.7 (rollback + operational controls) and V3.8 (tamper-evident audit integrity: per-tenant hash chains, signed checkpoints, append-only triggers, read-only audit API, standalone export verification — see docs/v3-audit-integrity.md) are IMPLEMENTED.**
 Version: 3.0.0-draft1
 Supersedes: nothing (extends V2, documented in `docs/v2-architecture.md`)
 Companion docs: `v3-security-model.md`, `v3-action-policy.md`, `v3-execution-model.md`, `v3-threat-model.md`, `roadmap-v3.md`
@@ -117,6 +117,7 @@ Finding → Investigation → Risk → Recommendation (V2)
 | **Verification Engine** | Per-type checks + before/after security comparison | sandbox (checks) + worker (comparison) |
 | **Rollback Controller** | Deterministic restore from snapshot; revert commit if needed | worker |
 | **AuditService** | Append-only, hash-chained audit events for every state transition | both API and worker |
+| **V3.8 IntegrityChain** | Per-tenant SHA-256 hash chains (`audit_service`), HMAC-signed checkpoints (key outside the DB), DB-level append-only triggers, read-only `/api/audit` surface, deterministic NDJSON export + standalone no-DB verifier | both API and worker |
 
 ### 3.2 Dataflow principles
 

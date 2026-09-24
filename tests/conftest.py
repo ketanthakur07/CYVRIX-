@@ -19,6 +19,7 @@ TEST_DB_URL = "sqlite+aiosqlite:///test_cyvrix.db"
 async def engine():
     """Create a session-scoped async SQLite engine."""
     eng = create_async_engine(TEST_DB_URL)
+    import app.models  # noqa: F401 — register V3.8 tables
 
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -58,6 +59,23 @@ async def clean_db(engine):
 @pytest.fixture
 def session_factory(engine):
     return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+@pytest.fixture
+async def test_installation(engine, clean_db):
+    """A real tenant (user → installation) for chain tests."""
+    from app.models import GithubInstallation, User
+    async with async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)() as s:
+        user = User(email=f"audit-{uuid4()}@test.local", github_id=None)
+        s.add(user)
+        await s.flush()
+        inst = GithubInstallation(
+            user_id=user.id, installation_id=int(uuid4().int % 1_000_000) + 1,
+            account_login="audit-org", account_type="Organization")
+        s.add(inst)
+        await s.commit()
+        await s.refresh(inst)
+        return inst
 
 
 @pytest.fixture

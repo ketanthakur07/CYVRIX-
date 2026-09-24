@@ -143,6 +143,33 @@ async def issue_push_token(
             "reason_code": grm.RC_OK,
         },
     ))
+    # V3.8: tamper-evident chain append in the SAME transaction. The
+    # chain is keyed by the tenant installation UUID (repository
+    # ownership) — GitRemediation.installation_id is the GitHub
+    # installation NUMBER (data), never chain identity.
+    from app.services import audit_service
+    from sqlalchemy import select as _select
+    from app.models import Repository as _Repository
+    _inst_uuid = (
+        await db.execute(
+            _select(_Repository.installation_id).where(
+                _Repository.id == remediation_row.repository_id)
+        )
+    ).scalar_one_or_none()
+    await audit_service.emit_security_event(
+        db,
+        installation_id=_inst_uuid,
+        event_type="GITHUB_CREDENTIAL_ISSUED",
+        actor_type=audit_service.ActorType.SYSTEM,
+        repository_id=remediation_row.repository_id,
+        authorization_id=remediation_row.execution_authorization_id,
+        reason_code=grm.RC_OK,
+        result="ISSUED",
+        payload={
+            "git_remediation_id": str(remediation_row.id),
+            "purpose": purpose,
+        },
+    )
     try:
         await db.commit()
     except Exception:
@@ -180,7 +207,29 @@ async def _record_denial(
             "reason_code": reason_code,
         },
     ))
-    try:
-        await db.commit()
-    except Exception:
-        await db.rollback()
+    # V3.8: tamper-evident chain append in the SAME transaction
+    # (tenant installation UUID resolved server-side from repository
+    # ownership; see the ISSUED path comment above).
+    from app.services import audit_service
+    from sqlalchemy import select as _select
+    from app.models import Repository as _Repository
+    _inst_uuid = (
+        await db.execute(
+            _select(_Repository.installation_id).where(
+                _Repository.id == remediation_row.repository_id)
+        )
+    ).scalar_one_or_none()
+    await audit_service.emit_security_event(
+        db,
+        installation_id=_inst_uuid,
+        event_type="CREDENTIAL_DENIED",
+        actor_type=audit_service.ActorType.SYSTEM,
+        repository_id=remediation_row.repository_id,
+        authorization_id=remediation_row.execution_authorization_id,
+        reason_code=reason_code,
+        result="DENIED",
+        payload={
+            "git_remediation_id": str(remediation_row.id),
+            "purpose": purpose,
+        },
+    )

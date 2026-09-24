@@ -948,6 +948,107 @@ class OperationalEvent(Base):
     )
 
 
+class AuditChain(Base):
+    """V3.8 — one append-only hash chain per tenant installation.
+
+    The chain row itself is metadata (identity + head bookkeeping); the
+    security property lives in audit_events (hash-linked events) and
+    audit_checkpoints (independently verifiable signed heads).
+    TAMPER-EVIDENT, not physically immutable: see docs/v3-audit-integrity.md.
+    """
+
+    __tablename__ = "audit_chains"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    installation_id = Column(
+        UUID(as_uuid=True), ForeignKey("github_installations.id"), nullable=False, unique=True
+    )
+    # Trusted head bookkeeping — advisory for monitoring/perf only. The
+    # verifier recomputes everything from events; checkpoints (signed,
+    # separate table) are the truncation-detection anchor.
+    last_sequence = Column(BigInteger, nullable=False, default=0)
+    last_event_digest = Column(Text)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow)
+
+
+class AuditChainEvent(Base):
+    """V3.8 — one hash-linked, sequence-ordered integrity event.
+
+    Security properties:
+    - event_digest = SHA-256(domain || prev_digest_hex || 0x1f || canonical_payload)
+      (see audit_service.canonical_event_payload / compute_event_digest)
+    - (chain_id, seq) unique and (chain_id, prev_digest) unique: no two
+      committed events may claim the same position or the same predecessor
+    - genesis: seq == 1 with prev_digest == GENESIS_PREV_DIGEST
+    - append-only through the application; UPDATE/DELETE are never issued
+      (DB role separation documented in docs/v3-audit-integrity.md)
+    - actor/event identity are server-derived; payloads are secret-free
+      (centralized redaction before canonicalization)
+    """
+
+    __tablename__ = "audit_chain_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    chain_id = Column(UUID(as_uuid=True), ForeignKey("audit_chains.id"), nullable=False)
+    seq = Column(BigInteger, nullable=False)
+    event_type = Column(Text, nullable=False)
+    event_version = Column(Integer, nullable=False, default=1)
+    actor_type = Column(Text, nullable=False)  # USER|ADMIN|WORKER|EXECUTOR|SYSTEM|RECONCILER|GITHUB_INTEGRATION
+    actor_id = Column(Text)                    # server-derived identity (user uuid, worker name, ...)
+    actor_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    repository_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id"))
+    action_id = Column(UUID(as_uuid=True))
+    authorization_id = Column(UUID(as_uuid=True))
+    execution_run_id = Column(UUID(as_uuid=True))
+    verification_id = Column(UUID(as_uuid=True))
+    rollback_id = Column(UUID(as_uuid=True))
+    reason_code = Column(Text)
+    result = Column(Text)                      # trusted server-side outcome
+    payload = Column(JSONB)                    # secret-free evidence (redacted)
+    occurred_at = Column(DateTime(timezone=True), nullable=False)
+    recorded_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    prev_digest = Column(Text, nullable=False)
+    event_digest = Column(Text, nullable=False)
+
+    __table_args__ = (
+        Index("uq_audit_chain_events_seq", "chain_id", "seq", unique=True),
+        Index("uq_audit_chain_events_prev", "chain_id", "prev_digest", unique=True),
+        Index("uq_audit_chain_events_digest", "event_digest", unique=True),
+        Index("ix_audit_chain_events_type", "event_type"),
+        Index("ix_audit_chain_events_repo", "repository_id"),
+        Index("ix_audit_chain_events_recorded", "recorded_at"),
+    )
+
+
+class AuditCheckpoint(Base):
+    """V3.8 — signed chain head (truncation-detection anchor).
+
+    Checkpoints are HMAC-Signed with a key held OUTSIDE the database
+    (settings.audit_checkpoint_key; 0 disables checkpointing). An
+    attacker with DB write access can rewrite rows, but cannot produce a
+    valid MAC over a forged (chain, seq, digest) tuple — tampering with
+    the tail or with checkpoint rows is detectable wherever a trusted
+    checkpoint (or offline export) exists outside the attacker's reach.
+    """
+
+    __tablename__ = "audit_checkpoints"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    chain_id = Column(UUID(as_uuid=True), ForeignKey("audit_chains.id"), nullable=False)
+    through_sequence = Column(BigInteger, nullable=False)
+    head_digest = Column(Text, nullable=False)
+    event_count = Column(BigInteger, nullable=False)
+    payload_digest = Column(Text, nullable=False)  # canonical checkpoint material (MAC input)
+    mac = Column(Text, nullable=False)             # HMAC-SHA-256(payload_digest)
+    mac_key_version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        Index("uq_audit_checkpoints_seq", "chain_id", "through_sequence", unique=True),
+    )
+
+
 class GithubCredentialIssuance(Base):
     """V3.5 — audit-only record of a short-lived, repo-scoped GitHub
     credential issuance bound to one remediation.

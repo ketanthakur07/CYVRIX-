@@ -17,6 +17,7 @@ from app.routes import execution_authorization
 from app.routes import execution_runs
 from app.routes import git_remediation
 from app.routes import ops as ops
+from app.routes import audit
 from app.session import get_redis, close_redis
 import logging
 
@@ -134,6 +135,7 @@ app.include_router(verification_rollback.router)
 # Controls the platform; NEVER authorizes a remediation: every gate
 # here fails closed and no capability bypasses V3.1–V3.6 security)
 app.include_router(ops.router)
+app.include_router(audit.router)
 
 
 @app.get("/api/health/live")

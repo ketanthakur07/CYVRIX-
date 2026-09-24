@@ -558,7 +558,17 @@ async def _op_event(
     reason_code: Optional[str] = None,
     detail: Optional[str] = None,
     actor: Optional[User] = None,
+    result: Optional[str] = None,
 ) -> None:
+    """V3.7 operational event + V3.8 integrity chain append.
+
+    The operational_events row remains the diagnostics feed; the V3.8
+    hash-linked chain is the tamper-evident record. SECURITY-CRITICAL
+    events (state transitions, emergency stop, resume, breaker reset)
+    join the caller's transaction: if the state change rolls back, the
+    event never existed. Chain failures never mask the operational
+    decision itself (best-effort policy for diagnostics).
+    """
     db.add(
         OperationalEvent(
             event_type=event_type,
@@ -570,6 +580,49 @@ async def _op_event(
             created_by_user_id=actor.id if actor is not None else None,
         )
     )
+    # V3.8: mirror into the tamper-evident chain (registry-validated).
+    try:
+        from app.services import audit_service
+        installation_id = await _installation_for_repository(db, repository_id)
+        if installation_id is not None:
+            await audit_service.emit_security_event(
+                db,
+                installation_id=installation_id,
+                event_type=event_type,
+                actor_type=(audit_service.ActorType.USER
+                            if actor is not None else audit_service.ActorType.SYSTEM),
+                actor_user_id=actor.id if actor is not None else None,
+                repository_id=repository_id,
+                reason_code=reason_code,
+                result=result or ("OK" if reason_code in (None, "OK") else reason_code),
+                payload={
+                    "subject_type": subject_type,
+                    "subject_id": str(subject_id) if subject_id else None,
+                    "detail": (detail or "")[:400] or None,
+                },
+            )
+    except audit_service.AuditEventError as exc:
+        # Unknown event type in the mirror path: the V3.7 feed is the
+        # diagnostics record of truth for ops; log loudly (integrity
+        # signal) but never block the operational action.
+        logger.error("audit_chain_registry_miss event=%s err=%s", event_type, exc)
+    except Exception as exc:  # chain unavailable: best-effort mirror
+        logger.warning("audit_chain_mirror_failed event=%s err=%s", event_type, type(exc).__name__)
+
+
+async def _installation_for_repository(db: AsyncSession, repository_id):
+    """Resolve the tenant (installation) that owns a repository.
+    Cached per-transaction via the identity map where possible; cheap
+    single lookup otherwise."""
+    if repository_id is None:
+        return None
+    from app.models import Repository
+    row = (
+        await db.execute(
+            select(Repository.installation_id).where(Repository.id == repository_id)
+        )
+    ).scalar_one_or_none()
+    return row
 
 
 # ── Watchdog: stuck execution detection (Phase 15) ───────────────────

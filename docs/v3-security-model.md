@@ -143,7 +143,7 @@ Approval consumed ──► Orchestrator requests a scoped, short-lived installa
 | 9 | Execution occurs in isolated workspace | Sandbox (execution model §2) |
 | 10 | Verification is mandatory | State machine cannot reach SUCCEEDED without verification_results |
 | 11 | Failure does not silently become success | State machine + verification gate + UI symmetry |
-| 12 | Every action is auditable | Hash-chained audit events at every transition |
+| 12 | Every action is auditable | Hash-chained audit events at every transition — since V3.8: per-tenant SHA-256 hash chains (audit_chain_events), signed checkpoints, DB-level append-only triggers, standalone export verification; tamper-EVIDENT with documented residual trust — see docs/v3-audit-integrity.md |
 | 13 | Expired approvals cannot execute | Expiry checked at authorize + pre-execution |
 | 14 | Changed repository state invalidates authorization | base_commit_sha re-verified at authorize + execute |
 | 15 | Critical policy violations are denied | Default-deny policy engine; DENY emits security audit event |

@@ -226,6 +226,23 @@ async def create_action_proposal(
             "status": status,
         },
     ))
+    # V3.8: tamper-evident chain append in the SAME transaction.
+    from app.services import audit_service
+    await audit_service.emit_from_legacy_audit(
+        db,
+        repository_id=repo.id,
+        event_type="ACTION_PROPOSAL_CREATED",
+        metadata={
+            "actor": str(user.id),
+            "action_digest": action_digest,
+            "proposal_id": None,  # assigned on flush; carried in payload
+            "recommendation_id": str(recommendation.id),
+            "policy_version": decision.policy_version,
+            "reason_code": decision.reason_code,
+        },
+        actor_user_id=user.id,
+        finding_id=finding.id,
+    )
     await db.commit()
     await db.refresh(proposal)
 
