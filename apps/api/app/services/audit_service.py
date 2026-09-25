@@ -469,7 +469,11 @@ async def emit_security_event(
             last_error = exc
             if not _is_sequencing_race(exc):
                 raise
-            await db.rollback()  # fresh state for the next attempt
+            # A lost sequencing race is retried from a clean transaction:
+            # the unique (chain_id, seq/prev_digest) backstop only fires once
+            # the competing append has committed, so a fresh transaction is
+            # required for the retry to observe the new head.
+            await db.rollback()
     raise last_error if last_error else AuditEventError("audit append failed")
 
 
@@ -614,34 +618,47 @@ async def emit_from_legacy_audit(
             return
         correlation = _correlation_from_metadata(metadata or {})
         actor_id = metadata.get("actor") if metadata else None
-        await emit_security_event(
-            db,
-            installation_id=installation_id,
-            event_type=event_type,
-            actor_type=ActorType.USER if actor_user_id is not None else ActorType.SYSTEM,
-            actor_id=actor_id,
-            actor_user_id=actor_user_id,
-            repository_id=repository_id,
-            action_id=correlation.get("proposal_id"),
-            authorization_id=correlation.get(
-                "execution_authorization_id",
-                correlation.get("authorization_id")),
-            execution_run_id=correlation.get("execution_run_id"),
-            verification_id=correlation.get("verification_id"),
-            rollback_id=correlation.get("rollback_id"),
-            reason_code=metadata.get("reason_code") if metadata else None,
-            result=result,
-            payload={
-                "legacy_event_type": event_type,
-                "finding_id": str(finding_id) if finding_id else None,
-                **correlation,
-            },
-        )
+        # The mirror is BEST-EFFORT and must never poison the producer's
+        # transaction. A SAVEPOINT contains any failure — including the
+        # producer's own pending constraint violation surfaced by the
+        # autoflush this append triggers (e.g. a concurrent exactly-once
+        # insert losing its unique index) — so the producer can still
+        # commit, or classify its own conflict, instead of dying with
+        # PendingRollbackError.
+        async with db.begin_nested():
+            await emit_security_event(
+                db,
+                installation_id=installation_id,
+                event_type=event_type,
+                actor_type=ActorType.USER if actor_user_id is not None else ActorType.SYSTEM,
+                actor_id=actor_id,
+                actor_user_id=actor_user_id,
+                repository_id=repository_id,
+                action_id=correlation.get("proposal_id"),
+                authorization_id=correlation.get(
+                    "execution_authorization_id",
+                    correlation.get("authorization_id")),
+                execution_run_id=correlation.get("execution_run_id"),
+                verification_id=correlation.get("verification_id"),
+                rollback_id=correlation.get("rollback_id"),
+                reason_code=metadata.get("reason_code") if metadata else None,
+                result=result,
+                payload={
+                    "legacy_event_type": event_type,
+                    "finding_id": str(finding_id) if finding_id else None,
+                    **correlation,
+                },
+            )
     except AuditEventError as exc:
         logger.error("audit_chain_registry_miss event=%s err=%s", event_type, exc)
     except Exception as exc:  # never mask the security decision itself
-        logger.warning("audit_chain_mirror_failed event=%s err=%s",
-                       event_type, type(exc).__name__)
+        # Include the DB-level cause so an integrity incident is diagnosable
+        # (constraint names only — audit payloads/credentials never appear).
+        logger.warning(
+            "audit_chain_mirror_failed event=%s err=%s detail=%s",
+            event_type, type(exc).__name__,
+            str(getattr(exc, "orig", exc))[:200],
+        )
 
 
 # ── Verifier (Phase 19/20) ────────────────────────────────────────────

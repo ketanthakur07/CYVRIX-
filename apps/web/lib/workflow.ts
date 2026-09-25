@@ -200,6 +200,88 @@ export const AUDIT_VERIFY_TONE: StateToneMap = {
   UNSUPPORTED_VERSION: "warning",
 };
 
+// ── V4.0 Organization platform ──────────────────────────────────────
+
+/** Membership states. Only ACTIVE is an authorizing state; the others
+ *  render as inert (neutral/pending) so the UI never suggests a
+ *  suspended or invited membership can act. */
+export const MEMBERSHIP_TONE: StateToneMap = {
+  ACTIVE: "success",
+  INVITED: "pending",
+  SUSPENDED: "warning",
+  REMOVED: "neutral",
+};
+
+export const ORG_STATE_TONE: StateToneMap = {
+  ACTIVE: "success",
+  SUSPENDED: "warning",
+  DELETED: "danger",
+};
+
+/** Organization roles, ordered most- to least-privileged for display. */
+export const ORG_ROLE_TONE: StateToneMap = {
+  ORG_OWNER: "danger",
+  ORG_ADMIN: "warning",
+  SECURITY_ENGINEER: "info",
+  DEVELOPER: "info",
+  AUDITOR: "neutral",
+  VIEWER: "neutral",
+};
+
+/** Invitation lifecycle. A revoked/accepted invitation is terminal. */
+export function invitationTone(invitation: {
+  revoked_at?: string | null;
+  accepted_at?: string | null;
+  expires_at?: string | null;
+}): StateTone {
+  if (invitation.revoked_at) return "danger";
+  if (invitation.accepted_at) return "success";
+  if (invitation.expires_at) {
+    const at = new Date(invitation.expires_at).getTime();
+    if (!Number.isNaN(at) && at < Date.now()) return "neutral";
+  }
+  return "pending";
+}
+
+export function invitationStatusLabel(invitation: {
+  revoked_at?: string | null;
+  accepted_at?: string | null;
+  expires_at?: string | null;
+}): string {
+  if (invitation.revoked_at) return "revoked";
+  if (invitation.accepted_at) return "accepted";
+  if (invitation.expires_at) {
+    const at = new Date(invitation.expires_at).getTime();
+    if (!Number.isNaN(at) && at < Date.now()) return "expired";
+  }
+  return "pending";
+}
+
+/** API key lifecycle. Revoked/expired keys are shown but never usable. */
+export function apiKeyTone(key: {
+  revoked_at?: string | null;
+  expires_at?: string | null;
+}): StateTone {
+  if (key.revoked_at) return "danger";
+  if (key.expires_at) {
+    const at = new Date(key.expires_at).getTime();
+    if (!Number.isNaN(at) && at < Date.now()) return "neutral";
+  }
+  return "success";
+}
+
+export function apiKeyStatus(key: {
+  revoked_at?: string | null;
+  expires_at?: string | null;
+}): string {
+  if (key.revoked_at) return "revoked";
+  if (key.expires_at) {
+    const at = new Date(key.expires_at).getTime();
+    if (!Number.isNaN(at) && at < Date.now()) return "expired";
+  }
+  return "active";
+}
+
 // ── Lifecycle stage model (action hub) ──────────────────────────────
 //
 // Ordered presentation of the remediation lifecycle. This is a display

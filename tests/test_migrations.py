@@ -75,6 +75,32 @@ class TestSchemaCompleteness:
             )
 
     @pytest.mark.asyncio
+    async def test_v4_platform_tables_exist(self, engine):
+        """V4.0 additive platform tables (organizations/memberships/
+        invitations/policy history/API keys)."""
+        expected_tables = {
+            "organizations", "organization_memberships",
+            "organization_invitations", "organization_policy_revisions",
+            "api_keys",
+        }
+        async with engine.connect() as conn:
+            actual_tables = set(await conn.run_sync(
+                lambda sync_conn: inspect(sync_conn).get_table_names()
+            ))
+        assert expected_tables.issubset(actual_tables), (
+            f"Missing V4 tables: {expected_tables - actual_tables}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_github_installations_have_organization_id(self, engine):
+        """V4 tenancy binding on the existing integration table (additive)."""
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(
+                lambda sync_conn: {c["name"] for c in inspect(sync_conn).get_columns("github_installations")}
+            )
+        assert "organization_id" in columns
+
+    @pytest.mark.asyncio
     async def test_users_columns(self, engine):
         expected = {"id", "email", "github_id", "github_login", "created_at"}
         async with engine.connect() as conn:

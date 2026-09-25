@@ -7,12 +7,45 @@ from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "apps", "api"))
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from app.database import Base, get_db
 from app.models import User, GithubInstallation, Repository, Scan, Finding
 from app.auth import get_current_user
 
 TEST_DB_URL = "sqlite+aiosqlite:///test_cyvrix.db"
+
+# V3.8 append-only audit tables. Their guard triggers are declared
+# FOR EACH STATEMENT, so ANY DELETE/UPDATE against them is rejected —
+# including a wipe of an already-empty table. Test harnesses that wipe a
+# real database must therefore disable the triggers for the duration of the
+# wipe. This is a TEST-HARNESS BOUNDARY only: the application has no code
+# path that can disable a trigger (see tests/test_audit_chain_races.py,
+# which asserts the ORM cannot even UPDATE audit history).
+AUDIT_APPEND_ONLY_TABLES = ("audit_chain_events", "audit_checkpoints")
+
+
+async def wipe_all_tables(conn) -> None:
+    """Delete every application table's rows on a real (PostgreSQL) database.
+
+    Use this instead of iterating ``Base.metadata.sorted_tables`` directly:
+    a plain DELETE against the append-only audit tables raises
+    ``CYVRIX audit records are append-only`` even when the table is empty.
+    """
+    disabled = []
+    for name in AUDIT_APPEND_ONLY_TABLES:
+        exists = (
+            await conn.execute(text("SELECT to_regclass(:n)"), {"n": name})
+        ).scalar()
+        if exists:
+            await conn.execute(text(f"ALTER TABLE {name} DISABLE TRIGGER USER"))
+            disabled.append(name)
+    try:
+        for table in reversed(Base.metadata.sorted_tables):
+            await conn.execute(table.delete())
+    finally:
+        for name in disabled:
+            await conn.execute(text(f"ALTER TABLE {name} ENABLE TRIGGER USER"))
 
 
 @pytest.fixture(scope="session")

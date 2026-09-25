@@ -93,12 +93,11 @@ async def session_factory(real_engine):
 @pytest.fixture
 async def clean_db(real_engine):
     """Wipe ALL tables between tests. Dedicated test database only."""
-    from app.database import Base
     from app.models import SystemControl
+    from conftest import wipe_all_tables
 
     async with real_engine.begin() as conn:
-        for table in reversed(Base.metadata.sorted_tables):
-            await conn.execute(table.delete())
+        await wipe_all_tables(conn)
         # V3.7: provision the operational_state row exactly as migration
         # 010 does in production (fail-closed parity; the ops gate's
         # missing/unreadable fail-closed behavior has dedicated tests).

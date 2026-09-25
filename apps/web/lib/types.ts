@@ -685,3 +685,189 @@ export const CAP = {
 } as const;
 
 export type Capability = (typeof CAP)[keyof typeof CAP];
+
+// ══════════════════════════════════════════════════════════════════
+// V4.0 PLATFORM CONTRACTS (organizations, membership, RBAC, API keys)
+//
+// These mirror `apps/api/app/routes/orgs.py` response schemas exactly.
+// Deliberately ABSENT: any authority field. The client never sends an
+// organization, role, or capability as authority — the server derives
+// all of them. Adding such a field here would be a tenancy bug.
+// ══════════════════════════════════════════════════════════════════
+
+/** Organization management roles (`services/v4_rbac.OrgRole`). */
+export type OrgRole =
+  | "ORG_OWNER"
+  | "ORG_ADMIN"
+  | "SECURITY_ENGINEER"
+  | "DEVELOPER"
+  | "AUDITOR"
+  | "VIEWER";
+
+export const ORG_ROLES: readonly OrgRole[] = [
+  "ORG_OWNER",
+  "ORG_ADMIN",
+  "SECURITY_ENGINEER",
+  "DEVELOPER",
+  "AUDITOR",
+  "VIEWER",
+] as const;
+
+export const ORG_ROLE_LABELS: Record<OrgRole, string> = {
+  ORG_OWNER: "Owner",
+  ORG_ADMIN: "Admin",
+  SECURITY_ENGINEER: "Security engineer",
+  DEVELOPER: "Developer",
+  AUDITOR: "Auditor",
+  VIEWER: "Viewer",
+};
+
+export const ORG_ROLE_DESCRIPTIONS: Record<OrgRole, string> = {
+  ORG_OWNER: "Full control, including ownership transfer and org deletion.",
+  ORG_ADMIN: "Manages members, policy, integrations and API keys.",
+  SECURITY_ENGINEER: "Runs the remediation workflow through its V3 gates.",
+  DEVELOPER: "Proposes remediation actions; cannot approve or execute them.",
+  AUDITOR: "Reads and verifies audit history; cannot change anything.",
+  VIEWER: "Read-only access to repositories, findings and actions.",
+};
+
+/** Membership states (`services/v4_rbac.MembershipState`).
+ *  Only ACTIVE confers authority — INVITED/SUSPENDED/REMOVED are inert. */
+export type MembershipState = "ACTIVE" | "SUSPENDED" | "INVITED" | "REMOVED";
+
+export const MEMBERSHIP_STATES: readonly MembershipState[] = [
+  "ACTIVE",
+  "SUSPENDED",
+  "INVITED",
+  "REMOVED",
+] as const;
+
+export interface Organization {
+  id: string;
+  name: string;
+  slug: string;
+  state: string;
+  is_personal: boolean;
+  policy_version: number;
+  role: string | null;
+  membership_state: string | null;
+  created_at: string | null;
+}
+
+export interface OrgMember {
+  user_id: string;
+  email: string | null;
+  role: string;
+  state: string;
+  created_at: string | null;
+}
+
+export interface OrgInvitation {
+  id: string;
+  email: string | null;
+  role: string;
+  expires_at: string | null;
+  accepted_at: string | null;
+  revoked_at: string | null;
+  created_at: string | null;
+}
+
+/** Plaintext `token` is returned by the server exactly once, at creation. */
+export interface OrgInvitationCreated extends OrgInvitation {
+  token: string;
+}
+
+export interface OrgApiKey {
+  id: string;
+  name: string;
+  prefix: string;
+  scopes: string[];
+  created_at: string | null;
+  expires_at: string | null;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
+/** Plaintext `secret` is returned by the server exactly once, at creation. */
+export interface OrgApiKeyCreated extends OrgApiKey {
+  secret: string;
+}
+
+export interface OrgCapabilities {
+  organization_id: string;
+  role: string;
+  membership_state: string;
+  capabilities: string[];
+}
+
+export interface OrgPolicy {
+  policy: Record<string, unknown>;
+  version: number;
+}
+
+/** Organization capability names, mirroring `services/v4_rbac`. */
+export const ORG_CAP = {
+  VIEW_REPOSITORIES: "VIEW_REPOSITORIES",
+  VIEW_FINDINGS: "VIEW_FINDINGS",
+  VIEW_ACTIONS: "VIEW_ACTIONS",
+  VIEW_EXECUTIONS: "VIEW_EXECUTIONS",
+  CREATE_ACTION: "CREATE_ACTION",
+  APPROVE_ACTION: "APPROVE_ACTION",
+  AUTHORIZE_EXECUTION: "AUTHORIZE_EXECUTION",
+  START_REMEDIATION: "START_REMEDIATION",
+  START_VERIFICATION: "START_VERIFICATION",
+  START_ROLLBACK: "START_ROLLBACK",
+  VIEW_AUDIT: "VIEW_AUDIT",
+  VERIFY_AUDIT: "VERIFY_AUDIT",
+  EXPORT_AUDIT: "EXPORT_AUDIT",
+  MANAGE_REPOSITORY: "MANAGE_REPOSITORY",
+  MANAGE_INTEGRATIONS: "MANAGE_INTEGRATIONS",
+  MANAGE_MEMBERS: "MANAGE_MEMBERS",
+  MANAGE_API_KEYS: "MANAGE_API_KEYS",
+  MANAGE_POLICY: "MANAGE_POLICY",
+  MANAGE_OPERATIONS: "MANAGE_OPERATIONS",
+  VIEW_OPERATIONS: "VIEW_OPERATIONS",
+  VIEW_DIAGNOSTICS: "VIEW_DIAGNOSTICS",
+  MANAGE_QUOTAS: "MANAGE_QUOTAS",
+  TRANSFER_OWNERSHIP: "TRANSFER_OWNERSHIP",
+  DELETE_ORGANIZATION: "DELETE_ORGANIZATION",
+} as const;
+
+export type OrgCapability = (typeof ORG_CAP)[keyof typeof ORG_CAP];
+
+/** API-key scopes. Deliberately NARROWER than member capabilities: a key
+ *  can never manage members, policy, operations, or the organization. */
+export const API_SCOPES: readonly string[] = [
+  "findings:read",
+  "repositories:read",
+  "actions:read",
+  "actions:create",
+  "executions:read",
+  "audit:read",
+  "audit:export",
+] as const;
+
+/** Scopes whose issuance is an administrative act (server re-checks). */
+export const HIGH_IMPACT_API_SCOPES: readonly string[] = [
+  "actions:create",
+  "audit:export",
+] as const;
+
+/** A membership only confers capability while ACTIVE. Mirrors the server
+ *  helper `effective_capabilities`; unknown states grant nothing. */
+export function effectiveCapabilities(
+  capabilities: string[] | undefined,
+  membershipState: string | null | undefined
+): string[] {
+  if (!capabilities) return [];
+  if (membershipState !== "ACTIVE") return [];
+  return capabilities;
+}
+
+export function hasOrgCapability(
+  capabilities: string[] | undefined,
+  membershipState: string | null | undefined,
+  capability: string
+): boolean {
+  return effectiveCapabilities(capabilities, membershipState).includes(capability);
+}

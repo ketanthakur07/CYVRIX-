@@ -39,6 +39,7 @@ from typing import Optional
 from uuid import uuid4
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -244,6 +245,26 @@ async def start_rollback(
                              "derived revert branch failed validation")
 
     db.add(rollback)
+    # Flush the exactly-once insert BEFORE auditing (see the identical
+    # reasoning in verification_service.start_verification): the UNIQUE
+    # (git_remediation_id) index is the concurrency backstop and a
+    # concurrent loser must be classified as REPLAY here, not surface from
+    # the best-effort audit mirror's autoflush and poison the transaction.
+    _remediation_id = remediation.id
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        winner = (
+            await db.execute(
+                select(RollbackRun).where(
+                    RollbackRun.git_remediation_id == _remediation_id)
+            )
+        ).scalar_one_or_none()
+        if winner is not None:
+            raise RollbackDenied(vm.RC_ROLLBACK_REPLAY,
+                                 f"existing rollback {winner.id}")
+        raise RollbackDenied("ROLLBACK_CONFLICT")
     await _audit(
         db, repository_id=remediation.repository_id,
         event_type="ROLLBACK_REQUESTED", reason_code=vm.RC_OK,
@@ -256,9 +277,6 @@ async def start_rollback(
             "revert_branch": rollback.revert_branch,
         },
     )
-    # Capture identity BEFORE the commit: a failed commit + rollback()
-    # expires ORM attributes (see start_verification — MissingGreenlet).
-    _remediation_id = remediation.id
     try:
         await db.commit()
     except Exception as exc:

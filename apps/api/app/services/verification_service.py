@@ -29,6 +29,7 @@ from typing import Optional
 from uuid import uuid4
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -690,6 +691,27 @@ async def start_verification(
         checks_total=len(plan.check_types),
     )
     db.add(verification)
+    # Flush the exactly-once insert BEFORE auditing. The UNIQUE
+    # (git_remediation_id) index is the concurrency backstop, and a
+    # concurrent loser must be classified as REPLAY here — if the audit
+    # mirror's autoflush surfaced this IntegrityError instead, it would
+    # surface in the best-effort mirror and poison the transaction,
+    # turning a deterministic 409 into an unhandled error.
+    _remediation_id = remediation.id
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        winner = (
+            await db.execute(
+                select(VerificationRun).where(
+                    VerificationRun.git_remediation_id == _remediation_id)
+            )
+        ).scalar_one_or_none()
+        if winner is not None:
+            raise VerificationDenied(vm.RC_VERIFICATION_REPLAY,
+                                     f"existing verification {winner.id}")
+        raise VerificationDenied("VERIFICATION_CONFLICT")
     await _audit(
         db, repository_id=remediation.repository_id,
         event_type="VERIFICATION_STARTED", reason_code=vm.RC_OK,
@@ -701,11 +723,6 @@ async def start_verification(
             "plan_digest": verification.plan_digest,
         },
     )
-    # Capture identity BEFORE the commit: a failed commit + rollback()
-    # expires ORM attributes, and reading remediation.id afterwards would
-    # trigger an implicit lazy load outside the greenlet context
-    # (MissingGreenlet) instead of the intended REPLAY classification.
-    _remediation_id = remediation.id
     try:
         await db.commit()
     except Exception as exc:

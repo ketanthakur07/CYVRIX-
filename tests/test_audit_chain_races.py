@@ -65,21 +65,10 @@ async def clean_db(real_engine):
     fixture TRUNCATES with the triggers disabled for the wipe, then
     re-enables them (test-harness boundary, never a product bypass: the
     application has no path to disable triggers)."""
-    from app.database import Base
     from app.models import SystemControl
+    from conftest import wipe_all_tables
     async with real_engine.begin() as conn:
-        await conn.execute(text(
-            "ALTER TABLE audit_chain_events DISABLE TRIGGER USER"))
-        await conn.execute(text(
-            "ALTER TABLE audit_checkpoints DISABLE TRIGGER USER"))
-        try:
-            for table in reversed(Base.metadata.sorted_tables):
-                await conn.execute(table.delete())
-        finally:
-            await conn.execute(text(
-                "ALTER TABLE audit_chain_events ENABLE TRIGGER USER"))
-            await conn.execute(text(
-                "ALTER TABLE audit_checkpoints ENABLE TRIGGER USER"))
+        await wipe_all_tables(conn)
         await conn.execute(
             SystemControl.__table__.insert().values(
                 key="operational_state", value="NORMAL"))

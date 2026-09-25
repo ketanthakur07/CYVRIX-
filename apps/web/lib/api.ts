@@ -631,3 +631,157 @@ export async function fetchAuditIntegrityStatus(): Promise<AuditIntegrityStatus>
 export function auditExportPath(chainId: string): string {
   return `/api/audit/chains/${encodeURIComponent(chainId)}/export`;
 }
+
+// ══════════════════════════════════════════════════════════════════
+// V4.0 Platform — organizations, members, invitations, API keys
+//
+// Tenancy rule enforced here in the CLIENT CALL SHAPE: the organization
+// always travels in the PATH (a selector the server verifies against the
+// caller's membership), never in a body field the server might trust.
+// No request body below carries organization_id, role-of-caller, or any
+// other authority value.
+// ══════════════════════════════════════════════════════════════════
+
+import type {
+  Organization,
+  OrgMember,
+  OrgInvitation,
+  OrgInvitationCreated,
+  OrgApiKey,
+  OrgApiKeyCreated,
+  OrgCapabilities,
+  OrgPolicy,
+} from "./types";
+
+/** Organizations the caller has any recorded membership in. */
+export async function fetchOrganizations(): Promise<Organization[]> {
+  return apiFetch<Organization[]>("/orgs");
+}
+
+export async function createOrganization(name: string): Promise<Organization> {
+  return apiFetch<Organization>("/orgs", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function fetchOrganization(
+  organizationId: string
+): Promise<Organization> {
+  return apiFetch<Organization>(`/orgs/${organizationId}`);
+}
+
+/** Server-derived role + capabilities for the caller in this organization.
+ *  Used ONLY to shape the UI; every route re-checks on the server. */
+export async function fetchOrgCapabilities(
+  organizationId: string
+): Promise<OrgCapabilities> {
+  return apiFetch<OrgCapabilities>(`/orgs/${organizationId}/capabilities`);
+}
+
+export async function fetchOrgMembers(
+  organizationId: string
+): Promise<OrgMember[]> {
+  return apiFetch<OrgMember[]>(`/orgs/${organizationId}/members`);
+}
+
+export async function changeMemberRole(
+  organizationId: string,
+  userId: string,
+  role: string
+): Promise<OrgMember> {
+  return apiFetch<OrgMember>(
+    `/orgs/${organizationId}/members/${userId}`,
+    { method: "PATCH", body: JSON.stringify({ role }) }
+  );
+}
+
+export async function changeMemberState(
+  organizationId: string,
+  userId: string,
+  state: string
+): Promise<OrgMember> {
+  return apiFetch<OrgMember>(
+    `/orgs/${organizationId}/members/${userId}/state`,
+    { method: "POST", body: JSON.stringify({ state }) }
+  );
+}
+
+export async function fetchOrgInvitations(
+  organizationId: string
+): Promise<OrgInvitation[]> {
+  return apiFetch<OrgInvitation[]>(`/orgs/${organizationId}/invitations`);
+}
+
+/** Returns the plaintext token exactly once — the caller must surface it
+ *  and never persist it. The server stores only its hash. */
+export async function createOrgInvitation(
+  organizationId: string,
+  body: { email?: string | null; role?: string }
+): Promise<OrgInvitationCreated> {
+  return apiFetch<OrgInvitationCreated>(
+    `/orgs/${organizationId}/invitations`,
+    { method: "POST", body: JSON.stringify(body) }
+  );
+}
+
+export async function revokeOrgInvitation(
+  organizationId: string,
+  invitationId: string
+): Promise<OrgInvitation> {
+  return apiFetch<OrgInvitation>(
+    `/orgs/${organizationId}/invitations/${invitationId}/revoke`,
+    { method: "POST", body: JSON.stringify({}) }
+  );
+}
+
+/** Accept a one-time invitation. The token IS the authority here. */
+export async function acceptOrgInvitation(token: string): Promise<Organization> {
+  return apiFetch<Organization>("/invitations/accept", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
+}
+
+export async function fetchOrgPolicy(
+  organizationId: string
+): Promise<OrgPolicy> {
+  return apiFetch<OrgPolicy>(`/orgs/${organizationId}/policy`);
+}
+
+export async function updateOrgPolicy(
+  organizationId: string,
+  policy: Record<string, unknown>
+): Promise<OrgPolicy> {
+  return apiFetch<OrgPolicy>(`/orgs/${organizationId}/policy`, {
+    method: "PUT",
+    body: JSON.stringify({ policy }),
+  });
+}
+
+export async function fetchApiKeys(
+  organizationId: string
+): Promise<OrgApiKey[]> {
+  return apiFetch<OrgApiKey[]>(`/orgs/${organizationId}/api-keys`);
+}
+
+/** Returns the plaintext secret exactly once — shown, then discarded. */
+export async function createApiKey(
+  organizationId: string,
+  body: { name: string; scopes: string[]; expires_at?: string | null }
+): Promise<OrgApiKeyCreated> {
+  return apiFetch<OrgApiKeyCreated>(`/orgs/${organizationId}/api-keys`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function revokeApiKey(
+  organizationId: string,
+  keyId: string
+): Promise<OrgApiKey> {
+  return apiFetch<OrgApiKey>(
+    `/orgs/${organizationId}/api-keys/${keyId}/revoke`,
+    { method: "POST", body: JSON.stringify({}) }
+  );
+}

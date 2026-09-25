@@ -12,14 +12,20 @@ import {
   User,
   Activity,
   Gauge,
+  Building2,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { fetchOpsCapabilities } from "@/lib/api";
+import { OrgSelector } from "@/components/org/org-selector";
 
 const baseItems = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/repositories", label: "Repositories", icon: GitBranch },
 ];
+
+// Organization administration is always reachable: the caller may hold no
+// organization yet, and that is exactly when they need this link.
+const orgItems = [{ href: "/orgs", label: "Organizations", icon: Building2 }];
 
 const consoleItems = [
   { href: "/operations", label: "Operations", icon: Gauge, capability: "VIEW_OPERATIONS" },
@@ -46,7 +52,9 @@ export function Navigation() {
       )
     : [];
 
-  const items = [...baseItems, ...visibleConsoleItems];
+  const items = isAuthenticated
+    ? [...baseItems, ...orgItems, ...visibleConsoleItems]
+    : [...baseItems];
 
   return (
     <header className="border-b bg-white">
@@ -83,7 +91,10 @@ export function Navigation() {
             <div className="h-8 w-8 rounded-full bg-gray-200 animate-pulse" />
           ) : isAuthenticated && user ? (
             <div className="flex items-center gap-3">
-              <span className="text-sm text-gray-600 flex items-center gap-1">
+              {/* Tenant selector. Changing it also clears cached tenant
+                  data; the server re-verifies membership regardless. */}
+              <OrgSelector />
+              <span className="hidden md:flex text-sm text-gray-600 items-center gap-1">
                 <User className="h-4 w-4" />
                 {user.github_login || user.email}
               </span>

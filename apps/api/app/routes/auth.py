@@ -188,6 +188,18 @@ async def github_callback(
         )
         db.add(user)
 
+    await db.flush()
+
+    # V4.0 — every user gets an organization context (idempotent). This
+    # grants no remediation authority: the user becomes ORG_OWNER of their
+    # own personal organization, and every V3 gate still applies in full.
+    # A failure here is logged (never silent) but must not block login.
+    try:
+        from app.services.organization_service import ensure_personal_organization
+        await ensure_personal_organization(db, user=user)
+    except Exception as exc:  # pragma: no cover - defensive provisioning
+        logger.warning("personal organization provisioning skipped: %s", type(exc).__name__)
+
     await db.commit()
     await db.refresh(user)
 

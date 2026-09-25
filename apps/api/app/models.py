@@ -39,9 +39,17 @@ class GithubInstallation(Base):
     installation_id = Column(BigInteger, unique=True, nullable=False)
     account_login = Column(Text, nullable=False)
     account_type = Column(Text, nullable=False)  # 'User' | 'Organization'
+    # V4.0 tenancy: the organization that owns this integration. Nullable so
+    # the migration can backfill existing rows (one personal org per owner)
+    # without breaking V3 ownership (user_id remains the legacy owner and is
+    # still honored when organization_id is NULL).
+    organization_id = Column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=True
+    )
     created_at = Column(DateTime(timezone=True), default=utcnow)
 
     user = relationship("User", back_populates="installations")
+    organization = relationship("Organization", back_populates="installations")
     repositories = relationship("Repository", back_populates="installation")
 
 
@@ -1095,3 +1103,171 @@ class GithubCredentialIssuance(Base):
         Index("ix_github_credential_issuances_remediation",
               "git_remediation_id"),
     )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# V4.0 — Platform foundation (organizations, memberships, API keys)
+#
+# An organization is a NAMESPACE, not a security boundary by itself:
+# every request still resolves authenticated identity → active membership
+# → resource ownership → capability. The organization is derived
+# server-side from the resource, never trusted from a request field.
+# ══════════════════════════════════════════════════════════════════════
+
+
+class Organization(Base):
+    __tablename__ = "organizations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    name = Column(Text, nullable=False)
+    slug = Column(Text, unique=True, nullable=False)
+    # ACTIVE | DELETION_REQUESTED | ARCHIVED | DELETED (Phase 33)
+    state = Column(Text, nullable=False, server_default="ACTIVE", default="ACTIVE")
+    # Auto-provisioned personal organization created by the V4 migration for
+    # each pre-existing installation owner. Kept distinguishable so future
+    # ownership migrations can treat it deliberately.
+    is_personal = Column(Boolean, nullable=False, default=False)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    # Versioned organization policy (Phase 12/14). The live policy is stored
+    # here with its version; every superseded version is preserved in
+    # organization_policy_revisions (monotonic history, never rewritten).
+    policy = Column(JSONB, nullable=False, default=dict)
+    policy_version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    memberships = relationship(
+        "OrganizationMembership", back_populates="organization",
+        cascade="all, delete-orphan",
+    )
+    installations = relationship("GithubInstallation", back_populates="organization")
+    invitations = relationship(
+        "OrganizationInvitation", back_populates="organization",
+        cascade="all, delete-orphan",
+    )
+    api_keys = relationship(
+        "ApiKey", back_populates="organization",
+        cascade="all, delete-orphan",
+    )
+    policy_revisions = relationship(
+        "OrganizationPolicyRevision", back_populates="organization",
+        cascade="all, delete-orphan",
+    )
+
+
+class OrganizationMembership(Base):
+    """Membership is server-side state, not an `is_member` boolean.
+
+    Only state=ACTIVE confers capabilities (see services/v4_rbac.py).
+    """
+
+    __tablename__ = "organization_memberships"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    organization_id = Column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+    )
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    role = Column(Text, nullable=False, default="VIEWER")
+    state = Column(Text, nullable=False, default="ACTIVE")  # ACTIVE|SUSPENDED|INVITED|REMOVED
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "user_id",
+                         name="uq_org_membership"),
+        Index("ix_org_memberships_user", "user_id", "state"),
+        Index("ix_org_memberships_org", "organization_id", "state"),
+    )
+
+    organization = relationship("Organization", back_populates="memberships")
+    user = relationship("User")
+
+
+class OrganizationInvitation(Base):
+    """One-time, expiring, hashed organization invitation (Phase 4).
+
+    The plaintext token is returned exactly once at creation; only its
+    SHA-256 hash is stored. The invitation is bound to the organization and
+    (when provided) to a lowercase email, so a leaked link cannot be
+    replayed or redirected to another org.
+    """
+
+    __tablename__ = "organization_invitations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    organization_id = Column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+    )
+    email = Column(Text, nullable=True)  # lowercased when present
+    role = Column(Text, nullable=False, default="VIEWER")
+    token_hash = Column(Text, unique=True, nullable=False)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    accepted_at = Column(DateTime(timezone=True))
+    accepted_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    revoked_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        Index("ix_org_invitations_org", "organization_id"),
+        Index("ix_org_invitations_email", "email"),
+    )
+
+    organization = relationship("Organization", back_populates="invitations")
+
+
+class OrganizationPolicyRevision(Base):
+    """Immutable policy history (Phase 14): a policy change never rewrites
+    the version an action was evaluated against."""
+
+    __tablename__ = "organization_policy_revisions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    organization_id = Column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+    )
+    version = Column(Integer, nullable=False)
+    policy = Column(JSONB, nullable=False)
+    changed_by = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "version",
+                         name="uq_org_policy_version"),
+    )
+
+    organization = relationship("Organization", back_populates="policy_revisions")
+
+
+class ApiKey(Base):
+    """Scoped, hashed, revocable organization API key (Phase 23/24).
+
+    - Only a SHA-256 hash of the secret is stored; the secret is shown once.
+    - `prefix` allows identification without revealing the secret.
+    - Scopes are a closed world (services/v4_rbac.py API_SCOPES).
+    - The key is bound to ONE organization; it can never be used for another
+      and can never manage members/policy/operations.
+    """
+
+    __tablename__ = "api_keys"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    organization_id = Column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+    )
+    name = Column(Text, nullable=False)
+    prefix = Column(Text, unique=True, nullable=False)
+    key_hash = Column(Text, unique=True, nullable=False)
+    scopes = Column(JSONB, nullable=False, default=list)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    expires_at = Column(DateTime(timezone=True))
+    last_used_at = Column(DateTime(timezone=True))
+    revoked_at = Column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_api_keys_org", "organization_id"),
+    )
+
+    organization = relationship("Organization", back_populates="api_keys")

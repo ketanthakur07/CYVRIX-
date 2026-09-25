@@ -18,6 +18,8 @@ from app.routes import execution_runs
 from app.routes import git_remediation
 from app.routes import ops as ops
 from app.routes import audit
+from app.routes import orgs as orgs
+from app.routes import api_v1
 from app.session import get_redis, close_redis
 import logging
 
@@ -136,6 +138,17 @@ app.include_router(verification_rollback.router)
 # here fails closed and no capability bypasses V3.1–V3.6 security)
 app.include_router(ops.router)
 app.include_router(audit.router)
+
+# CYVRIX V4.0 — platform foundation.
+# Organizations/memberships/RBAC are a NAMESPACE + authorization layer
+# around the V3 security chain, never a replacement for it. Organization
+# administration cannot approve, authorize, or execute a remediation.
+app.include_router(orgs.router)
+app.include_router(orgs.invitation_router)
+
+# Versioned public API foundation (API-key authenticated, tenant-scoped,
+# deliberately narrower than the console API).
+app.include_router(api_v1.router)
 
 
 @app.get("/api/health/live")

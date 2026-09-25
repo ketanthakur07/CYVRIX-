@@ -96,11 +96,10 @@ async def session_factory(real_engine):
 @pytest.fixture
 async def clean_db(real_engine):
     """Wipe ALL tables between tests. Dedicated test database only."""
-    from app.database import Base
+    from conftest import wipe_all_tables
 
     async with real_engine.begin() as conn:
-        for table in reversed(Base.metadata.sorted_tables):
-            await conn.execute(table.delete())
+        await wipe_all_tables(conn)
         # Kill switch OFF for the race scenarios (each test seeds its own)
         await conn.execute(
             SystemControl.__table__.insert().values(
