@@ -121,6 +121,19 @@ class OpsStateOut(BaseModel):
     detail: Optional[str] = None
 
 
+class CapabilitiesOut(BaseModel):
+    """Server-derived identity view for the console (V3.9).
+
+    Read-only presentation of the SAME role/capability resolution the
+    capability dependencies enforce. It grants nothing: every route
+    re-derives the role server-side, so a tampered response can only
+    change what the browser displays, never what the server permits.
+    """
+    role: str
+    capabilities: list[str]
+    step_up_required: list[str]
+
+
 class OpsTransitionIn(BaseModel):
     target: str = Field(min_length=4, max_length=20)
 
@@ -152,6 +165,28 @@ class ReconciliationOut(BaseModel):
     status: str
     stats: Optional[dict] = None
     findings: Optional[list] = None
+
+
+# ── Identity: caller capabilities (authenticated only) ───────────────
+
+
+@router.get("/capabilities", response_model=CapabilitiesOut)
+async def get_capabilities(
+    user: User = Depends(get_current_user),
+):
+    """Return the caller's server-derived role and capability set.
+
+    Authenticated but NOT capability-gated (a caller must be able to
+    discover its own authority). No tenant data is exposed. The console
+    uses this only to shape the UI; the server remains authoritative.
+    """
+    role = _user_role(user)
+    caps = sorted(om.ROLE_CAPABILITIES.get(role, frozenset()))
+    return CapabilitiesOut(
+        role=role,
+        capabilities=caps,
+        step_up_required=sorted(om.STEP_UP_REQUIRED_CAPABILITIES),
+    )
 
 
 # ── Read: system status (VIEW_OPERATIONS) ────────────────────────────

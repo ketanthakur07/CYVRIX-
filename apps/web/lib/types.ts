@@ -366,3 +366,322 @@ export const APPROVAL_STATE_COLORS: Record<ApprovalState, string> = {
   REVOKED: "bg-purple-100 text-purple-800",
   USED: "bg-blue-100 text-blue-800",
 };
+
+// ══════════════════════════════════════════════════════════════════
+// V3.3–V3.8 CONTRACTS (mirror backend Pydantic schemas exactly; do
+// not add fields the backend does not send)
+// ══════════════════════════════════════════════════════════════════
+
+// ── V3.3 Execution authorization ──────────────────────────────────
+
+export type AuthorizationState =
+  | "AUTHORIZED"
+  | "CONSUMED"
+  | "EXPIRED"
+  | "REVOKED";
+
+export interface ExecutionAuthorization {
+  id: string;
+  action_proposal_id: string;
+  approval_id: string;
+  action_digest: string;
+  repository_id: string;
+  base_commit_sha: string;
+  target_branch: string;
+  policy_version: string;
+  policy_decision: string;
+  authorization_state: string;
+  contract: Record<string, unknown>;
+  contract_digest: string;
+  contract_version: string;
+  authorized_by_user_id: string;
+  consumed_at: string | null;
+  created_at: string | null;
+}
+
+// ── V3.4 Execution runs ───────────────────────────────────────────
+
+export type ExecutionRunState =
+  | "ADMISSION_PENDING"
+  | "EXECUTING"
+  | "RESULT_READY"
+  | "COMPLETED"
+  | "FAILED"
+  | "CLEANUP_FAILED";
+
+export interface ExecutionRun {
+  id: string;
+  execution_authorization_id: string;
+  action_proposal_id: string;
+  repository_id: string;
+  action_digest: string;
+  contract_digest: string;
+  run_state: string;
+  fail_reason_code: string | null;
+  fail_detail: string | null;
+  execution_profile: string;
+  resource_profile: Record<string, unknown>;
+  cleanup_status: string;
+  cleanup_detail: string | null;
+  result: Record<string, unknown> | null;
+  diff_digest: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string | null;
+}
+
+// ── V3.5 Git/GitHub remediation ───────────────────────────────────
+
+export type RemediationState =
+  | "PENDING"
+  | "VERIFYING"
+  | "COMMITTING"
+  | "COMMITTED"
+  | "PUSHING"
+  | "PUSHED"
+  | "PR_CREATING"
+  | "PR_CREATED"
+  | "FAILED"
+  | "STALE"
+  | "INCONSISTENT";
+
+export interface GitRemediation {
+  id: string;
+  execution_run_id: string;
+  execution_authorization_id: string;
+  action_proposal_id: string;
+  repository_id: string;
+  action_digest: string;
+  remediation_state: string;
+  fail_reason_code: string | null;
+  fail_detail: string | null;
+  repo_owner: string;
+  repo_name: string;
+  base_commit_sha: string;
+  source_branch: string;
+  target_branch: string;
+  remediation_branch: string;
+  committed_sha: string | null;
+  pushed_sha: string | null;
+  pr_number: number | null;
+  pr_url: string | null;
+  pr_state: string | null;
+  stage_ceiling: string;
+  cleanup_status: string;
+  created_at: string | null;
+  finished_at: string | null;
+}
+
+// ── V3.6 Verification ─────────────────────────────────────────────
+
+export type VerificationState =
+  | "PENDING"
+  | "RUNNING"
+  | "COMPLETED"
+  | "FAILED"
+  | "BLOCKED";
+
+export type VerificationResult =
+  | "PASS"
+  | "FAIL"
+  | "INCONCLUSIVE"
+  | "SKIPPED"
+  | "BLOCKED";
+
+export interface VerificationRun {
+  id: string;
+  git_remediation_id: string;
+  execution_run_id: string;
+  repository_id: string;
+  action_digest: string;
+  verification_state: string;
+  result: string | null;
+  reason_code: string | null;
+  detail: string | null;
+  plan_version: string;
+  plan_digest: string;
+  checks_total: number;
+  checks_passed: number;
+  checks_failed: number;
+  checks_other: number;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string | null;
+  verification_plan: Record<string, unknown>;
+}
+
+export interface VerificationCheck {
+  check_type: string;
+  check_version: string;
+  result: string;
+  reason_code: string;
+  evidence: Record<string, unknown>;
+}
+
+// ── V3.6 Rollback ─────────────────────────────────────────────────
+
+export type RollbackState =
+  | "PENDING"
+  | "PRECHECK"
+  | "ROLLING_BACK"
+  | "VERIFYING"
+  | "COMPLETED"
+  | "FAILED"
+  | "CONFLICT";
+
+export interface RollbackRun {
+  id: string;
+  git_remediation_id: string;
+  repository_id: string;
+  action_digest: string;
+  rollback_state: string;
+  fail_reason_code: string | null;
+  fail_detail: string | null;
+  rollback_target_sha: string;
+  expected_branch_sha: string;
+  revert_branch: string;
+  revert_sha: string | null;
+  revert_pr_number: number | null;
+  revert_pr_url: string | null;
+  cleanup_status: string;
+  created_at: string | null;
+  finished_at: string | null;
+}
+
+// ── V3.7 Operations ───────────────────────────────────────────────
+
+export type OpsRole = "USER" | "OPERATOR" | "ADMIN";
+
+export interface OpsCapabilities {
+  role: string;
+  capabilities: string[];
+  step_up_required: string[];
+}
+
+export interface OpsState {
+  operational_state: string;
+  kill_switch_disabled: boolean;
+  detail: string | null;
+}
+
+export interface RepositoryControl {
+  repository_id: string;
+  control_state: string;
+  reason: string | null;
+}
+
+export interface CircuitBreaker {
+  id: string;
+  repository_id: string;
+  scope: string;
+  action_type: string;
+  breaker_state: string;
+  consecutive_failures: number;
+  max_consecutive_failures: number;
+}
+
+export interface Reconciliation {
+  id: string;
+  trigger: string;
+  status: string;
+  stats: Record<string, unknown> | null;
+  findings: Array<Record<string, unknown>> | null;
+}
+
+export interface OperationalEvent {
+  id: string;
+  event_type: string;
+  repository_id: string | null;
+  reason_code: string | null;
+  detail: string | null;
+  created_at: string | null;
+}
+
+// ── V3.8 Audit ────────────────────────────────────────────────────
+
+export type AuditVerifyStatus =
+  | "VALID"
+  | "INVALID"
+  | "EMPTY"
+  | "UNSUPPORTED_VERSION";
+
+export interface AuditChain {
+  chain_id: string;
+  installation_id: string;
+  last_sequence: number;
+  head_digest: string | null;
+}
+
+export interface AuditEvent {
+  chain_id: string;
+  seq: number;
+  event_type: string;
+  event_version: number;
+  actor_type: string;
+  actor_id: string | null;
+  repository_id: string | null;
+  action_id: string | null;
+  authorization_id: string | null;
+  execution_run_id: string | null;
+  verification_id: string | null;
+  rollback_id: string | null;
+  reason_code: string | null;
+  result: string | null;
+  payload: Record<string, unknown>;
+  occurred_at: string;
+  recorded_at: string;
+  prev_digest: string;
+  event_digest: string;
+}
+
+export interface AuditVerifyIssue {
+  code: string;
+  seq: number | null;
+  detail: string | null;
+}
+
+export interface AuditVerifyResult {
+  chain_id: string;
+  status: string;
+  checked_events: number;
+  issues: AuditVerifyIssue[];
+}
+
+export interface AuditCheckpoint {
+  chain_id: string;
+  through_sequence: number;
+  head_digest: string;
+  event_count: number;
+  mac_key_version: number;
+  created_at: string;
+}
+
+export interface AuditIntegrityStatus {
+  chains: Array<{
+    chain_id: string;
+    last_sequence: number;
+    event_count: number;
+    head_matches_last_event: boolean;
+  }>;
+  checkpointing_enabled: boolean;
+}
+
+// ── Capability constants (must match backend ops_model) ───────────
+
+export const CAP = {
+  VIEW_OPERATIONS: "VIEW_OPERATIONS",
+  VIEW_AUDIT: "VIEW_AUDIT",
+  VERIFY_AUDIT: "VERIFY_AUDIT",
+  EXPORT_AUDIT: "EXPORT_AUDIT",
+  PAUSE_SYSTEM: "PAUSE_SYSTEM",
+  RESUME_SYSTEM: "RESUME_SYSTEM",
+  EMERGENCY_STOP: "EMERGENCY_STOP",
+  CANCEL_JOB: "CANCEL_JOB",
+  RETRY_JOB: "RETRY_JOB",
+  RESET_CIRCUIT: "RESET_CIRCUIT",
+  VIEW_DIAGNOSTICS: "VIEW_DIAGNOSTICS",
+  SET_REPO_CONTROL: "SET_REPO_CONTROL",
+  RUN_RECONCILIATION: "RUN_RECONCILIATION",
+} as const;
+
+export type Capability = (typeof CAP)[keyof typeof CAP];

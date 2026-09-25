@@ -21,6 +21,7 @@ import {
   rejectProposal,
 } from "@/lib/api";
 import type { ActionProposal, Approval } from "@/lib/types";
+import { ActionLifecycle } from "@/components/workflow/action-lifecycle";
 
 /**
  * CYVRIX V3.2 — Human approval screen for one action proposal.
@@ -431,6 +432,15 @@ export default function ActionApprovalPage() {
           </div>
         </div>
       )}
+
+      {/* V3.9 — full lifecycle: authorization → execution → remediation →
+          verification → rollback. Display-only; the server is authority. */}
+      <div className="mt-10 border-t pt-6">
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">
+          Remediation lifecycle
+        </h2>
+        <ActionLifecycle proposal={proposal} approval={approval} />
+      </div>
     </div>
   );
 }

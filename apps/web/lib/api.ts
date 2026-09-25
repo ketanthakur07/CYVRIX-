@@ -14,13 +14,38 @@ const API_BASE = "/api";
 export class ApiError extends Error {
   public status: number;
   public detail?: string;
+  /**
+   * Machine-readable server reason code (e.g. "STEP_UP_REQUIRED",
+   * "KILL_SWITCH_ACTIVE"). Always a server-controlled enum-like token,
+   * never reconstructed from free text. Optional.
+   */
+  public reasonCode?: string;
 
-  constructor(status: number, message: string, detail?: string) {
+  constructor(status: number, message: string, detail?: string, reasonCode?: string) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+    this.reasonCode = reasonCode;
   }
+}
+
+/** Extract a safe reason code from a backend error body without ever
+ * trusting or echoing free-form internals. Only a token matching the
+ * server's SCREAMING_SNAKE convention is accepted. */
+function extractReasonCode(body: unknown): string | undefined {
+  if (!body || typeof body !== "object") return undefined;
+  const detail = (body as { detail?: unknown }).detail;
+  const candidate =
+    typeof detail === "string"
+      ? detail
+      : detail && typeof detail === "object"
+      ? (detail as { reason_code?: unknown }).reason_code
+      : undefined;
+  if (typeof candidate === "string" && /^[A-Z][A-Z0-9_]{2,63}$/.test(candidate)) {
+    return candidate;
+  }
+  return undefined;
 }
 
 function classifyError(status: number): string {
@@ -83,9 +108,18 @@ export async function apiFetch<T>(
 
   if (!response.ok) {
     let detail: string | undefined;
+    let reasonCode: string | undefined;
     try {
       const body = await response.json();
-      detail = body.detail || body.message;
+      reasonCode = extractReasonCode(body);
+      const rawDetail = (body as { detail?: unknown }).detail;
+      if (typeof rawDetail === "string") {
+        detail = rawDetail;
+      } else if (rawDetail && typeof rawDetail === "object") {
+        detail = String(
+          (rawDetail as { message?: unknown }).message ?? reasonCode ?? ""
+        );
+      }
     } catch {
       // Ignore parse errors on error responses
     }
@@ -93,8 +127,14 @@ export async function apiFetch<T>(
     throw new ApiError(
       response.status,
       classifyError(response.status),
-      detail
+      detail,
+      reasonCode
     );
+  }
+
+  // 204/205 carry no body; never attempt to parse JSON from nothing.
+  if (response.status === 204 || response.status === 205) {
+    return undefined as T;
   }
 
   return response.json() as Promise<T>;
@@ -323,4 +363,271 @@ export async function revokeApproval(
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+// ══════════════════════════════════════════════════════════════════
+// V3.3–V3.8 CLIENTS
+//
+// Every mutation here sends only human metadata. No client function
+// accepts an authority field (approved/authorized/verified/rollback_sha/
+// decision/tenant/actor) — those do not exist in the request schemas and
+// are enforced server-side. State returned by these calls is display
+// data; the server remains the authority for every transition.
+// ══════════════════════════════════════════════════════════════════
+
+import type {
+  AuditChain,
+  AuditCheckpoint,
+  AuditEvent,
+  AuditIntegrityStatus,
+  AuditVerifyResult,
+  CircuitBreaker,
+  ExecutionAuthorization,
+  ExecutionRun,
+  GitRemediation,
+  OperationalEvent,
+  OpsCapabilities,
+  OpsState,
+  Reconciliation,
+  RepositoryControl,
+  RollbackRun,
+  VerificationCheck,
+  VerificationRun,
+} from "./types";
+
+// ── V3.3 Execution authorization ──────────────────────────────────────
+
+/** Authorize execution of an APPROVED action (authorization data only;
+ * executes nothing). Server re-verifies digest/policy/approval/step-up. */
+export async function authorizeAction(
+  proposalId: string,
+  body: { reason?: string }
+): Promise<ExecutionAuthorization> {
+  return apiFetch<ExecutionAuthorization>(`/actions/${proposalId}/authorize`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchProposalAuthorizations(
+  proposalId: string
+): Promise<ExecutionAuthorization[]> {
+  return apiFetch<ExecutionAuthorization[]>(
+    `/actions/${proposalId}/authorization`
+  );
+}
+
+export async function fetchAuthorization(
+  authorizationId: string
+): Promise<ExecutionAuthorization> {
+  return apiFetch<ExecutionAuthorization>(
+    `/actions/authorization/${authorizationId}`
+  );
+}
+
+/** Revoke a live authorization (AUTHORIZED → REVOKED; no resurrection). */
+export async function revokeAuthorization(
+  authorizationId: string,
+  body: { reason?: string }
+): Promise<ExecutionAuthorization> {
+  return apiFetch<ExecutionAuthorization>(
+    `/actions/authorization/${authorizationId}/revoke`,
+    { method: "POST", body: JSON.stringify(body) }
+  );
+}
+
+// ── V3.4 Execution runs ───────────────────────────────────────────────
+
+export async function fetchProposalRuns(
+  proposalId: string
+): Promise<ExecutionRun[]> {
+  return apiFetch<ExecutionRun[]>(`/actions/${proposalId}/runs`);
+}
+
+export async function fetchExecutionRun(runId: string): Promise<ExecutionRun> {
+  return apiFetch<ExecutionRun>(`/executor/runs/user/${runId}`);
+}
+
+// ── V3.5 Git/GitHub remediation ───────────────────────────────────────
+
+/** Start remediation for a server-verified run. Body is empty by design
+ * (extra="forbid"): no branch, digest, or stage ceiling is accepted. */
+export async function startRemediation(
+  runId: string
+): Promise<GitRemediation> {
+  return apiFetch<GitRemediation>(`/actions/runs/${runId}/remediation`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function fetchRunRemediations(
+  runId: string
+): Promise<GitRemediation[]> {
+  return apiFetch<GitRemediation[]>(`/actions/runs/${runId}/remediation`);
+}
+
+export async function fetchRemediation(
+  remediationId: string
+): Promise<GitRemediation> {
+  return apiFetch<GitRemediation>(`/remediations/${remediationId}`);
+}
+
+// ── V3.6 Verification ─────────────────────────────────────────────────
+
+/** Create the exactly-once verification record (executes nothing). */
+export async function startVerification(
+  remediationId: string
+): Promise<VerificationRun> {
+  return apiFetch<VerificationRun>(
+    `/remediations/${remediationId}/verification`,
+    { method: "POST", body: JSON.stringify({}) }
+  );
+}
+
+export async function fetchRemediationVerifications(
+  remediationId: string
+): Promise<VerificationRun[]> {
+  return apiFetch<VerificationRun[]>(
+    `/remediations/${remediationId}/verification`
+  );
+}
+
+export async function fetchVerification(
+  verificationId: string
+): Promise<VerificationRun> {
+  return apiFetch<VerificationRun>(`/verifications/${verificationId}`);
+}
+
+export async function fetchVerificationChecks(
+  verificationId: string
+): Promise<VerificationCheck[]> {
+  return apiFetch<VerificationCheck[]>(`/verifications/${verificationId}/checks`);
+}
+
+// ── V3.6 Rollback ─────────────────────────────────────────────────────
+
+/** Create the exactly-once rollback record. No client SHA exists; the
+ * target is server-derived from the frozen contract. Executes nothing. */
+export async function startRollback(
+  remediationId: string
+): Promise<RollbackRun> {
+  return apiFetch<RollbackRun>(`/remediations/${remediationId}/rollback`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function fetchRemediationRollbacks(
+  remediationId: string
+): Promise<RollbackRun[]> {
+  return apiFetch<RollbackRun[]>(`/remediations/${remediationId}/rollback`);
+}
+
+export async function fetchRollback(rollbackId: string): Promise<RollbackRun> {
+  return apiFetch<RollbackRun>(`/rollbacks/${rollbackId}`);
+}
+
+// ── V3.7 Operations ───────────────────────────────────────────────────
+
+/** Server-derived role/capabilities. Used ONLY to shape the UI; the
+ * server independently authorizes every call. */
+export async function fetchOpsCapabilities(): Promise<OpsCapabilities> {
+  return apiFetch<OpsCapabilities>("/ops/capabilities");
+}
+
+export async function fetchOpsStatus(): Promise<OpsState> {
+  return apiFetch<OpsState>("/ops/status");
+}
+
+export async function setOpsState(target: string): Promise<OpsState> {
+  return apiFetch<OpsState>("/ops/state", {
+    method: "POST",
+    body: JSON.stringify({ target }),
+  });
+}
+
+export async function fetchRepositoryControl(
+  repositoryId: string
+): Promise<RepositoryControl> {
+  return apiFetch<RepositoryControl>(`/ops/repositories/${repositoryId}/control`);
+}
+
+export async function setRepositoryControl(
+  repositoryId: string,
+  body: { control_state: string; reason?: string }
+): Promise<RepositoryControl> {
+  return apiFetch<RepositoryControl>(`/ops/repositories/${repositoryId}/control`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchBreakers(): Promise<CircuitBreaker[]> {
+  return apiFetch<CircuitBreaker[]>("/ops/breakers");
+}
+
+export async function resetBreaker(breakerId: string): Promise<CircuitBreaker> {
+  return apiFetch<CircuitBreaker>(`/ops/breakers/${breakerId}/reset`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function runReconciliation(): Promise<Reconciliation> {
+  return apiFetch<Reconciliation>("/ops/reconciliation/run", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function fetchLastReconciliation(): Promise<Reconciliation | null> {
+  return apiFetch<Reconciliation | null>("/ops/reconciliation/last");
+}
+
+export async function fetchOpsEvents(limit = 50): Promise<OperationalEvent[]> {
+  return apiFetch<OperationalEvent[]>(`/ops/events?limit=${encodeURIComponent(limit)}`);
+}
+
+// ── V3.8 Audit ────────────────────────────────────────────────────────
+
+export async function fetchAuditChains(): Promise<AuditChain[]> {
+  return apiFetch<AuditChain[]>("/audit/chains");
+}
+
+export async function fetchAuditEvents(
+  chainId: string,
+  params?: { limit?: number; from_seq?: number }
+): Promise<AuditEvent[]> {
+  const search = new URLSearchParams();
+  if (params?.limit != null) search.set("limit", String(params.limit));
+  if (params?.from_seq != null) search.set("from_seq", String(params.from_seq));
+  const qs = search.toString();
+  return apiFetch<AuditEvent[]>(
+    `/audit/chains/${chainId}/events${qs ? `?${qs}` : ""}`
+  );
+}
+
+/** Ask the SERVER to verify a chain. The browser never computes the
+ * cryptographic chain itself. */
+export async function verifyAuditChain(
+  chainId: string
+): Promise<AuditVerifyResult> {
+  return apiFetch<AuditVerifyResult>(`/audit/chains/${chainId}/verify`);
+}
+
+export async function fetchAuditCheckpoints(
+  chainId: string
+): Promise<AuditCheckpoint[]> {
+  return apiFetch<AuditCheckpoint[]>(`/audit/chains/${chainId}/checkpoints`);
+}
+
+export async function fetchAuditIntegrityStatus(): Promise<AuditIntegrityStatus> {
+  return apiFetch<AuditIntegrityStatus>("/audit/integrity/status");
+}
+
+/** Download URL for the deterministic NDJSON export (GET, attachment).
+ * Returned as a path the browser navigates to; no client-side build. */
+export function auditExportPath(chainId: string): string {
+  return `/api/audit/chains/${encodeURIComponent(chainId)}/export`;
 }

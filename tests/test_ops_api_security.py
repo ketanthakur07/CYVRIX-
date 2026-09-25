@@ -410,6 +410,60 @@ class TestRateLimiting:
         assert r.status_code == 429
 
 
+@pytest.mark.usefixtures("clean_rate_limits")
+class TestCapabilitiesEndpoint:
+    """V3.9 console identity view — read-only, server-derived, no authority."""
+
+    def test_unauthenticated_denied(self, client):
+        r = client.get("/api/ops/capabilities")
+        assert r.status_code == 401
+
+    def test_user_role_has_no_capabilities(self, user_client):
+        r = user_client.get("/api/ops/capabilities")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["role"] == om.Role.USER
+        assert body["capabilities"] == []
+
+    def test_operator_capabilities_do_not_include_audit(self, operator_client):
+        r = operator_client.get("/api/ops/capabilities")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["role"] == om.Role.OPERATOR
+        assert om.CAP_VIEW_OPERATIONS in body["capabilities"]
+        assert om.CAP_VIEW_AUDIT not in body["capabilities"]
+        assert set(body["step_up_required"]) == set(om.STEP_UP_REQUIRED_CAPABILITIES)
+
+    def test_admin_capabilities_include_audit(self, client, session_factory, test_user):
+        test_user.role = om.Role.ADMIN
+        r = authenticated_client_for(client, test_user).get("/api/ops/capabilities")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["role"] == om.Role.ADMIN
+        for cap in (om.CAP_VIEW_OPERATIONS, om.CAP_VIEW_AUDIT,
+                    om.CAP_VERIFY_AUDIT, om.CAP_EXPORT_AUDIT):
+            assert cap in body["capabilities"]
+
+    def test_invalid_role_fails_closed(self, client, session_factory, test_user):
+        test_user.role = "SUPERADMIN"
+        r = authenticated_client_for(client, test_user).get("/api/ops/capabilities")
+        assert r.status_code == 200
+        assert r.json()["role"] == om.Role.USER
+        assert r.json()["capabilities"] == []
+
+    def test_query_params_cannot_escalate(self, user_client):
+        r = user_client.get("/api/ops/capabilities?role=ADMIN&capabilities=EMERGENCY_STOP")
+        assert r.status_code == 200
+        assert r.json()["role"] == om.Role.USER
+        assert r.json()["capabilities"] == []
+
+    def test_no_secret_leakage(self, operator_client):
+        import json
+        body = json.dumps(operator_client.get("/api/ops/capabilities").json())
+        for needle in ("secret", "token", "password", "private_key"):
+            assert needle not in body.lower()
+
+
 class TestNoSecretLeakage:
     def test_status_response_has_no_secrets(self, operator_client):
         import json

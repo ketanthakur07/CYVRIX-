@@ -2,17 +2,51 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Shield, LayoutDashboard, GitBranch, LogIn, LogOut, User } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import {
+  Shield,
+  LayoutDashboard,
+  GitBranch,
+  LogIn,
+  LogOut,
+  User,
+  Activity,
+  Gauge,
+} from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import { fetchOpsCapabilities } from "@/lib/api";
 
-const navItems = [
+const baseItems = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/repositories", label: "Repositories", icon: GitBranch },
+];
+
+const consoleItems = [
+  { href: "/operations", label: "Operations", icon: Gauge, capability: "VIEW_OPERATIONS" },
+  { href: "/audit", label: "Audit", icon: Activity, capability: "VIEW_AUDIT" },
 ];
 
 export function Navigation() {
   const pathname = usePathname();
   const { isAuthenticated, user, isLoading, login, logout } = useAuth();
+
+  // Capabilities shape the UI only. The server independently authorizes
+  // every route; hiding a link is a UX convenience, never a security
+  // boundary. Fetched only when authenticated to avoid a 401 redirect.
+  const capabilitiesQuery = useQuery({
+    queryKey: ["ops-capabilities"],
+    queryFn: fetchOpsCapabilities,
+    enabled: isAuthenticated,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const visibleConsoleItems = isAuthenticated
+    ? consoleItems.filter((item) =>
+        capabilitiesQuery.data?.capabilities.includes(item.capability)
+      )
+    : [];
+
+  const items = [...baseItems, ...visibleConsoleItems];
 
   return (
     <header className="border-b bg-white">
@@ -22,14 +56,15 @@ export function Navigation() {
             <Shield className="h-6 w-6 text-blue-600" />
             CYVRIX
           </Link>
-          <nav className="flex items-center gap-1">
-            {navItems.map((item) => {
+          <nav className="flex items-center gap-1" aria-label="Main">
+            {items.map((item) => {
               const Icon = item.icon;
               const isActive = pathname.startsWith(item.href);
               return (
                 <Link
                   key={item.href}
                   href={item.href}
+                  aria-current={isActive ? "page" : undefined}
                   className={`flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
                     isActive
                       ? "bg-blue-50 text-blue-700"
