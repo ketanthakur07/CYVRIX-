@@ -262,6 +262,11 @@ def run_scan(scan_id: str):
     - Credentials never logged
     - Workspace cleaned in finally block
     - All exceptions caught and recorded
+    - V4.1 COMMIT BINDING: a scan carrying requested_commit_sha is bound
+      to that exact commit. The actual clone SHA is compared to it and a
+      mismatch fails the scan (COMMIT_MISMATCH) instead of silently
+      analyzing a different commit — a stale CI/webhook request can
+      never have its result attributed to the wrong commit.
     """
     logger.info("scan_started scan_id=%s", scan_id)
     db = SessionLocal()
@@ -315,6 +320,21 @@ def run_scan(scan_id: str):
 
             commit_sha = clone_repo(clone_url, workspace, repo.default_branch)
             scan.commit_sha = commit_sha
+
+            # ── V4.1 commit binding: verify BEFORE any analysis ──────
+            requested = (scan.requested_commit_sha or "").strip().lower()
+            if requested and commit_sha and commit_sha.lower() != requested:
+                # The repository advanced past the requested commit (or a
+                # caller lied about it — the platform cannot tell and
+                # does not need to). Refuse: no findings will ever be
+                # produced for a commit other than the requested one.
+                db.rollback()
+                _fail_scan(db, scan, "COMMIT_MISMATCH")
+                logger.warning(
+                    "commit_binding_mismatch scan_id=%s requested=%s cloned=%s",
+                    scan_id, requested[:8], str(commit_sha)[:8],
+                )
+                return {"error": "COMMIT_MISMATCH"}
             db.commit()
 
             # Clone URL no longer needed — clear from memory

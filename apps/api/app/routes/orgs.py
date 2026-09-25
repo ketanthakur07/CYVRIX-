@@ -45,6 +45,10 @@ def _org_error(exc: OrgError) -> HTTPException:
         "LAST_OWNER_PROTECTED", "INVITATION_ALREADY_ACCEPTED",
         "INVITATION_REVOKED", "INVITATION_EXPIRED", "MEMBERSHIP_NOT_FOUND",
         "ORGANIZATION_NOT_FOUND", "API_KEY_NOT_FOUND", "INVITATION_NOT_FOUND",
+        # Rotation of an already-revoked key is a state conflict, not a
+        # malformed request: a concurrent rotation loser must be told it
+        # lost the race, deterministically.
+        "API_KEY_ALREADY_REVOKED",
     }
     status_code = 409 if exc.reason_code in conflict else 400
     if exc.reason_code.endswith("NOT_PERMITTED") or exc.reason_code in (
@@ -545,4 +549,33 @@ async def revoke_api_key(
         id=str(row.id), name=row.name, prefix=row.prefix, scopes=list(row.scopes or []),
         created_at=_iso(row.created_at), expires_at=_iso(row.expires_at),
         last_used_at=_iso(row.last_used_at), revoked_at=_iso(row.revoked_at),
+    )
+
+
+@router.post("/{organization_id}/api-keys/{key_id}/rotate",
+             response_model=ApiKeyCreated, status_code=201)
+async def rotate_api_key(
+    organization_id: UUID,
+    key_id: UUID,
+    request: Request,
+    ctx=Depends(require_org_capability(rbac.CAP_MANAGE_API_KEYS)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Rotate a key: the old key stops working immediately and a new secret
+    is issued once. The successor keeps the same name, scopes and expiry —
+    rotation never silently extends a key's lifetime."""
+    actor, actor_membership = ctx
+    await rate_limit_org(request, org_id=organization_id, bucket="keys", limit=60)
+    try:
+        row, secret = await api_key_service.rotate_api_key(
+            db, org_id=organization_id, actor_membership=actor_membership,
+            actor_user_id=actor.id, key_id=key_id,
+        )
+        await db.commit()
+    except OrgError as exc:
+        await db.rollback()
+        raise _org_error(exc)
+    return ApiKeyCreated(
+        id=str(row.id), name=row.name, prefix=row.prefix, scopes=list(row.scopes or []),
+        created_at=_iso(row.created_at), expires_at=_iso(row.expires_at), secret=secret,
     )

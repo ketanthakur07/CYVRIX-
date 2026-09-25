@@ -465,6 +465,29 @@ async def last_reconciliation(
 # ── Operational events (diagnostics feed) ────────────────────────────
 
 
+@router.get("/metrics")
+async def get_metrics(
+    request: Request,
+    user: User = Depends(require_capability(om.CAP_VIEW_DIAGNOSTICS)),
+):
+    """V4.1 metrics snapshot (Prometheus text format).
+
+    An OPERATOR surface: capability-gated, session-authenticated, never
+    on the public API. The payload is content-free by construction —
+    bounded, allowlisted label values only; no organization names,
+    repository names, branches, or user content can appear.
+    """
+    await _rate_limited(request, user, "metrics", settings.ops_rate_limit_per_hour)
+    from app.metrics import render_prometheus
+
+    from fastapi.responses import PlainTextResponse
+
+    return PlainTextResponse(
+        render_prometheus(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
+
+
 @router.get("/events")
 async def list_events(
     request: Request,

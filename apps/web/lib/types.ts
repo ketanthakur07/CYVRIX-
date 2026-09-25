@@ -836,20 +836,45 @@ export const ORG_CAP = {
 export type OrgCapability = (typeof ORG_CAP)[keyof typeof ORG_CAP];
 
 /** API-key scopes. Deliberately NARROWER than member capabilities: a key
- *  can never manage members, policy, operations, or the organization. */
+ *  can never manage members, policy, operations, or the organization.
+ *
+ *  MUST mirror `services/v4_rbac.API_SCOPES` exactly. The server refuses an
+ *  unknown scope at issuance (`INVALID_API_KEY_SCOPES`), so offering one
+ *  here that the backend does not recognise produces a guaranteed failure
+ *  the user cannot diagnose. `apps/web/__tests__/org-rbac.test.ts` pins the
+ *  shape (reads only + no administrative scope). */
 export const API_SCOPES: readonly string[] = [
-  "findings:read",
+  // Read
   "repositories:read",
+  "findings:read",
+  "scans:read",
   "actions:read",
-  "actions:create",
   "executions:read",
+  "verifications:read",
+  "rollback:read",
   "audit:read",
-  "audit:export",
+  "integrations:read",
+  // Read-only verification of existing history
+  "audit:verify",
+  // Mutation: submits an analysis request only
+  "scans:create",
 ] as const;
 
-/** Scopes whose issuance is an administrative act (server re-checks). */
+/** Scopes whose issuance is an administrative act (server re-checks).
+ *  Mirrors `services/v4_rbac.HIGH_IMPACT_API_SCOPES`. */
 export const HIGH_IMPACT_API_SCOPES: readonly string[] = [
+  "scans:create",
+] as const;
+
+/** Designed scopes that the server REFUSES to issue until the endpoint that
+ *  would enforce them exists. Shown as unavailable rather than omitted, so
+ *  the gap is visible instead of implied by silence. */
+export const PLANNED_API_SCOPES: readonly string[] = [
+  "findings:write",
   "actions:create",
+  "executions:create",
+  "rollback:create",
+  "integrations:manage",
   "audit:export",
 ] as const;
 

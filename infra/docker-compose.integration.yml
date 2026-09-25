@@ -40,7 +40,10 @@ services:
       DATABASE_URL_SYNC: postgresql://cyvrix_test:cyvrix_test_password@postgres:5432/cyvrix_test
       REDIS_URL: redis://redis:6379/0
       SECRET_KEY: test-secret-key-for-integration-only-not-for-production-32chars!
-      ENVIRONMENT: test
+      # The policy engine (POL-020) denies any approval flow outside the
+      # supported {development, staging, production} set — fail-closed by
+      # design. The e2e stack must therefore run as a supported environment.
+      ENVIRONMENT: development
       APP_URL: http://localhost:3001
       API_URL: http://localhost:8001
       GITHUB_CLIENT_ID: test-github-client-id
@@ -67,7 +70,9 @@ services:
       DATABASE_URL_SYNC: postgresql://cyvrix_test:cyvrix_test_password@postgres:5432/cyvrix_test
       REDIS_URL: redis://redis:6379/0
       SECRET_KEY: test-secret-key-for-integration-only-not-for-production-32chars!
-      ENVIRONMENT: test
+      # See the api service note: policy engine requires a supported
+      # environment for approval re-evaluation.
+      ENVIRONMENT: development
       GITHUB_APP_ID: ""
       GITHUB_APP_PRIVATE_KEY: ""
       OPENAI_API_KEY: test-openai-key
@@ -83,6 +88,10 @@ services:
     build:
       context: ..
       dockerfile: apps/web/Dockerfile
+      args:
+        # Next.js bakes rewrite destinations into routes-manifest.json at
+        # build time; runtime env alone cannot retarget them.
+        API_BACKEND_URL: http://api:8000
     ports:
       - "3001:3000"
     environment:

@@ -82,11 +82,16 @@ class Scan(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
     repository_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id"), nullable=False)
     status = Column(Text, nullable=False, default="QUEUED")  # QUEUED|CLONING|SCANNING|ANALYZING|COMPLETED|FAILED
-    trigger = Column(Text, nullable=False, default="manual")
+    trigger = Column(Text, nullable=False, default="manual")  # manual|api|webhook|ci
     error_reason = Column(Text)
     started_at = Column(DateTime(timezone=True))
     completed_at = Column(DateTime(timezone=True))
     commit_sha = Column(Text)
+    # V4.1 — the exact commit this request is bound to. SERVER-SET ONLY:
+    # public endpoints never accept it from the caller; the API/CI/webhook
+    # paths set it server-side, and the worker refuses (COMMIT_MISMATCH)
+    # when the actual clone SHA differs.
+    requested_commit_sha = Column(Text)
     created_at = Column(DateTime(timezone=True), default=utcnow)
 
     repository = relationship("Repository", back_populates="scans")
@@ -963,13 +968,23 @@ class AuditChain(Base):
     security property lives in audit_events (hash-linked events) and
     audit_checkpoints (independently verifiable signed heads).
     TAMPER-EVIDENT, not physically immutable: see docs/v3-audit-integrity.md.
+
+    V4.1: an organization may hold ZERO installations (a key-only tenant),
+    so key-lifecycle and API events chain into a per-ORGANIZATION chain
+    instead (organization_id set, installation_id NULL). Exactly one of
+    the two owners is set per chain row; the partial unique indexes in
+    migration 013 enforce that at the database level.
     """
 
     __tablename__ = "audit_chains"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
     installation_id = Column(
-        UUID(as_uuid=True), ForeignKey("github_installations.id"), nullable=False, unique=True
+        UUID(as_uuid=True), ForeignKey("github_installations.id"), nullable=True, unique=True
+    )
+    # V4.1 — org-level chain owner (mutually exclusive with installation_id).
+    organization_id = Column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=True, unique=True
     )
     # Trusted head bookkeeping — advisory for monitoring/perf only. The
     # verifier recomputes everything from events; checkpoints (signed,
@@ -1271,3 +1286,143 @@ class ApiKey(Base):
     )
 
     organization = relationship("Organization", back_populates="api_keys")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# V4.1 — Idempotency / replay protection
+#
+# ONE primitive serves two problems that are structurally identical:
+#
+#   - API idempotency: `Idempotency-Key` on a public mutation, so a retry
+#     of "submit a scan" cannot create a second scan.
+#   - Webhook replay protection: a provider delivery id, so a re-delivered
+#     GitHub event cannot be processed twice.
+#
+# Both reduce to: a server-side record of (tenant, namespace, client key)
+# → the outcome that was produced, with a digest of the request so that
+# "same key, different request" is detectable rather than silently
+# returning the wrong result.
+#
+# The row is TENANT-SCOPED and namespaced. A key value presented by
+# organization A can never match a record owned by organization B, and the
+# same client key used against two different operations is two distinct
+# records.
+# ══════════════════════════════════════════════════════════════════════
+
+
+class ApiIdempotencyKey(Base):
+    """A completed (or in-flight) idempotent operation.
+
+    Invariants enforced by the database, not by convention:
+      - UNIQUE(organization_id, scope, key_value)  → one record per tenant
+        per operation namespace per client key. This is what makes a
+        concurrent duplicate deterministic: the loser cannot insert.
+      - `request_digest` binds the record to the exact request, so replay
+        with a DIFFERENT body is a conflict rather than a false replay.
+
+    `response_status`/`response_body` store the ORIGINAL outcome so a
+    legitimate retry receives the same answer instead of re-executing.
+    """
+
+    __tablename__ = "api_idempotency_keys"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    organization_id = Column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+    )
+    # Operation namespace (e.g. "POST /api/v1/scans", "webhook:push").
+    scope = Column(Text, nullable=False)
+    # The client-supplied Idempotency-Key or provider delivery id.
+    key_value = Column(Text, nullable=False)
+    request_digest = Column(Text, nullable=False)
+    # IN_PROGRESS | COMPLETED
+    state = Column(Text, nullable=False, default="IN_PROGRESS")
+    response_status = Column(Integer)
+    response_body = Column(JSONB)
+    # Which API key / integration produced it (audit + rotation forensics).
+    actor_api_key_prefix = Column(Text)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    completed_at = Column(DateTime(timezone=True))
+    # Bounded retention: replay protection must not grow without limit.
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id", "scope", "key_value",
+            name="uq_idempotency_org_scope_key",
+        ),
+        Index("ix_idempotency_expiry", "expires_at"),
+        Index("ix_idempotency_org_created", "organization_id", "created_at"),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# V4.1 — Inbound GitHub webhook ingestion
+#
+# A delivery row is a SECURITY RECORD, not a log line: it is the server's
+# structured account of what GitHub sent, whether the signature was
+# genuine, and what was done about it. Raw payloads are never persisted —
+# only bounded, non-sensitive metadata — so the table cannot become a
+# shadow store of repository content.
+#
+# Replay protection: UNIQUE(organization_id, delivery_id). The idempotency
+# primitive reserves (org, scope="webhook:<event>", key=<delivery id>)
+# inside the SAME transaction that claims this row, so a redelivered
+# event is refused by the database before any processing happens.
+# ══════════════════════════════════════════════════════════════════════
+
+
+class WebhookDelivery(Base):
+    """One received (and admitted or refused) GitHub webhook delivery.
+
+    Fields are deliberately limited to identity/binding/outcome. There is
+    no payload column: anything that could carry repository content,
+    branch names, commit messages or secrets is summarized as a bounded,
+    allowlisted reason code or a redacted count.
+    """
+
+    __tablename__ = "webhook_deliveries"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    # The tenant that owns this delivery. For an ADMITTED event this is
+    # derived from trusted installation state. For a REFUSED event the
+    # installation cannot be trusted, so the row is stored tenant-less
+    # (organization_id NULL) and still counts for rate-limiting and metrics.
+    organization_id = Column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=True
+    )
+    github_delivery_id = Column(Text, nullable=False)
+    event_type = Column(Text, nullable=False)
+    # Signature state: VALID | INVALID | MISSING | MALFORMED
+    signature_state = Column(Text, nullable=False)
+    # Outcome: ACCEPTED | REJECTED
+    outcome = Column(Text, nullable=False)
+    reason_code = Column(Text)  # bounded, allowlisted refusal taxonomy
+    # Resolved trusted state (NULL unless ADMITTED and fully bound)
+    installation_pk = Column(
+        UUID(as_uuid=True), ForeignKey("github_installations.id"), nullable=True
+    )
+    repository_pk = Column(
+        UUID(as_uuid=True), ForeignKey("repositories.id"), nullable=True
+    )
+    # Commit binding for push events (the exact observed head).
+    commit_sha = Column(Text)
+    ref = Column(Text)
+    # Derived effect reference (the scan this delivery caused), so a
+    # delivery can never silently duplicate a side effect.
+    scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.id"), nullable=True)
+    received_at = Column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        # One row per tenant per delivery id. Refused deliveries (no
+        # trusted tenant) are exempt from uniqueness in the DB layer by
+        # being NULL-keyed; the reservation primitive still blocks their
+        # replay for the rate-limit window.
+        UniqueConstraint(
+            "organization_id", "github_delivery_id",
+            name="uq_webhook_deliveries_org_delivery",
+        ),
+        Index("ix_webhook_deliveries_org", "organization_id"),
+        Index("ix_webhook_deliveries_outcome", "outcome"),
+        Index("ix_webhook_deliveries_received", "received_at"),
+    )

@@ -785,3 +785,15 @@ export async function revokeApiKey(
     { method: "POST", body: JSON.stringify({}) }
   );
 }
+
+/** Rotate a key: the old key stops working immediately and the replacement
+ *  secret is returned exactly once. Scopes and expiry are preserved. */
+export async function rotateApiKey(
+  organizationId: string,
+  keyId: string
+): Promise<OrgApiKeyCreated> {
+  return apiFetch<OrgApiKeyCreated>(
+    `/orgs/${organizationId}/api-keys/${keyId}/rotate`,
+    { method: "POST", body: JSON.stringify({}) }
+  );
+}

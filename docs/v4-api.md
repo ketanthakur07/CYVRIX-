@@ -1,6 +1,22 @@
 # CYVRIX V4 — Public API (`/api/v1`)
 
-Status: IMPLEMENTED
+> **SUPERSEDED by [`docs/v4-public-api.md`](v4-public-api.md) (V4.1).**
+>
+> This page was the V4.0 sketch. Two things in it are now out of date and
+> this notice is deliberately left in place rather than quietly edited:
+>
+> 1. **List endpoints now return a paginated envelope** `{items,
+>    next_cursor, has_more}` instead of a bare array.
+> 2. **The scope set changed.** `actions:create` and `audit:export` were
+>    listed here as "reserved" but had no endpoint to enforce them; V4.1
+>    refuses to issue a scope that backs no endpoint, so those moved to
+>    `PLANNED_API_SCOPES` and the currently issuable set is the one in
+>    `v4-public-api.md` §2.
+>
+> Error responses remain backward compatible: the `detail` token is
+> preserved and `code`/`message`/`request_id` are added.
+
+Status: IMPLEMENTED (V4.0 baseline)
 Source: `apps/api/app/routes/api_v1.py`
 Authentication: `apps/api/app/routes/org_auth.py` (`api_key_auth`,
 `require_api_scope`)
@@ -39,22 +55,18 @@ Authorization: Bearer cyv_<prefix>_<secret>
 
 ### Scopes
 
-| Scope | Grants |
-|---|---|
-| `repositories:read` | list repositories |
-| `findings:read` | list findings |
-| `actions:read` | list action proposals |
-| `executions:read` | reserved for execution reads |
-| `audit:read` | reserved for audit reads |
-| `actions:create` | high impact — proposal creation |
-| `audit:export` | high impact — audit export |
+See `docs/v4-public-api.md` §2 for the authoritative, endpoint-backed table.
+The V4.0 set was `repositories:read`, `findings:read`, `actions:read`,
+`executions:read`, `audit:read` (issued) plus `actions:create` and
+`audit:export` (listed as reserved but **not backed by any endpoint**). V4.1
+removed the unbacked ones from the issuable set.
 
 A key without the required scope receives `403 API_SCOPE_REQUIRED`.
 
 There is no scope that can manage members, policy, operations or quotas, and
-none that can transfer ownership or delete an organization. Issuing a
-high-impact scope requires at least `ORG_ADMIN` standing
-(`HIGH_IMPACT_SCOPE_REQUIRES_ADMIN`).
+none that can transfer ownership or delete an organization. Issuing any key
+at all requires `MANAGE_API_KEYS` (i.e. `ORG_ADMIN`/`ORG_OWNER`); see
+`v4-api-security.md` §3 for the high-impact guard and its reachability.
 
 ---
 

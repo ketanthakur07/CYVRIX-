@@ -7,9 +7,13 @@
  * never granted, and an unrecognised state renders neutral rather than
  * looking approved.
  */
+import * as fs from "fs";
+import * as path from "path";
+
 import {
   API_SCOPES,
   HIGH_IMPACT_API_SCOPES,
+  PLANNED_API_SCOPES,
   MEMBERSHIP_STATES,
   ORG_CAP,
   ORG_ROLES,
@@ -112,6 +116,45 @@ describe("API key scopes", () => {
     for (const scope of HIGH_IMPACT_API_SCOPES) {
       expect(API_SCOPES).toContain(scope);
     }
+  });
+
+  it("keeps planned scopes non-issuable", () => {
+    // A scope the server refuses (no endpoint enforces it) must not also be
+    // offered as selectable, or the user hits a guaranteed error.
+    for (const scope of PLANNED_API_SCOPES) {
+      expect(API_SCOPES).not.toContain(scope);
+    }
+  });
+
+  it("mirrors the backend scope registry exactly", () => {
+    // The console and the server are two languages with one contract: the
+    // server refuses any scope it does not recognise, so a drift here would
+    // surface as an unexplainable failure at key creation.
+    const backendPath = path.join(
+      __dirname,
+      "..",
+      "..",
+      "api",
+      "app",
+      "services",
+      "v4_rbac.py"
+    );
+    const source = fs.readFileSync(backendPath, "utf8");
+
+    const extract = (name: string): string[] => {
+      const start = source.indexOf(`${name}: frozenset[str] = frozenset({`);
+      expect(start).toBeGreaterThan(-1);
+      const body = source.slice(start, source.indexOf("})", start));
+      return Array.from(body.matchAll(/"([a-z]+:[a-z]+)"/g), (m) => m[1]);
+    };
+
+    expect([...API_SCOPES].sort()).toEqual(extract("API_SCOPES").sort());
+    expect([...HIGH_IMPACT_API_SCOPES].sort()).toEqual(
+      extract("HIGH_IMPACT_API_SCOPES").sort()
+    );
+    expect([...PLANNED_API_SCOPES].sort()).toEqual(
+      extract("PLANNED_API_SCOPES").sort()
+    );
   });
 
   it("grants no scope that manages members, policy or the organization", () => {

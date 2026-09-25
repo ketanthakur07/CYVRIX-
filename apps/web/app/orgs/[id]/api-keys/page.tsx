@@ -12,8 +12,13 @@
 import { useState } from "react";
 import { useParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Plus, ShieldAlert } from "lucide-react";
-import { createApiKey, fetchApiKeys, revokeApiKey } from "@/lib/api";
+import { KeyRound, Plus, RefreshCw, ShieldAlert } from "lucide-react";
+import {
+  createApiKey,
+  fetchApiKeys,
+  revokeApiKey,
+  rotateApiKey,
+} from "@/lib/api";
 import { useOrg, useOrgCapabilities } from "@/lib/org";
 import { Alert, EmptyState } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -25,6 +30,7 @@ import { SecretReveal } from "@/components/org/secret-reveal";
 import {
   API_SCOPES,
   HIGH_IMPACT_API_SCOPES,
+  PLANNED_API_SCOPES,
   ORG_CAP,
 } from "@/lib/types";
 import type { OrgApiKeyCreated } from "@/lib/types";
@@ -44,6 +50,7 @@ export default function OrganizationApiKeysPage() {
   const [scopes, setScopes] = useState<string[]>(["findings:read"]);
   const [expiresAt, setExpiresAt] = useState("");
   const [issued, setIssued] = useState<OrgApiKeyCreated | null>(null);
+  const [issuedReason, setIssuedReason] = useState<"created" | "rotated">("created");
 
   const keysQuery = useQuery({
     queryKey: ["org-api-keys", organizationId],
@@ -64,6 +71,7 @@ export default function OrganizationApiKeysPage() {
       }),
     onSuccess: (key) => {
       setIssued(key);
+      setIssuedReason("created");
       setName("");
       setExpiresAt("");
       setScopes(["findings:read"]);
@@ -75,6 +83,18 @@ export default function OrganizationApiKeysPage() {
     mutationFn: (keyId: string) =>
       revokeApiKey(organizationId as string, keyId),
     onSuccess: invalidateKeys,
+  });
+
+  // Rotation's successor secret is shown once, so the new value is surfaced
+  // through the same one-time reveal as creation.
+  const rotateMutation = useMutation({
+    mutationFn: (keyId: string) =>
+      rotateApiKey(organizationId as string, keyId),
+    onSuccess: (key) => {
+      setIssued(key);
+      setIssuedReason("rotated");
+      invalidateKeys();
+    },
   });
 
   if (!organization) {
@@ -106,8 +126,14 @@ export default function OrganizationApiKeysPage() {
         <SecretReveal
           label="api-key-secret"
           secret={issued.secret}
-          title="API key created"
-          hint="Copy this key now. The server stores only its hash, so it cannot be shown again."
+          title={
+            issuedReason === "rotated" ? "Key rotated" : "API key created"
+          }
+          hint={
+            issuedReason === "rotated"
+              ? "The previous key stopped working immediately. Copy the replacement now — it cannot be shown again."
+              : "Copy this key now. The server stores only its hash, so it cannot be shown again."
+          }
         />
       )}
 
@@ -270,15 +296,27 @@ export default function OrganizationApiKeysPage() {
                         </p>
                       </div>
                       {!revoked && (
-                        <Button
-                          variant="danger"
-                          pending={revokeMutation.isPending}
-                          disabled={revokeMutation.isPending}
-                          onClick={() => revokeMutation.mutate(key.id)}
-                        >
-                          <ShieldAlert className="h-4 w-4" />
-                          Revoke
-                        </Button>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            variant="secondary"
+                            pending={rotateMutation.isPending}
+                            disabled={rotateMutation.isPending}
+                            title="Issue a replacement secret; this key stops working immediately"
+                            onClick={() => rotateMutation.mutate(key.id)}
+                          >
+                            <RefreshCw className="h-4 w-4" />
+                            Rotate
+                          </Button>
+                          <Button
+                            variant="danger"
+                            pending={revokeMutation.isPending}
+                            disabled={revokeMutation.isPending}
+                            onClick={() => revokeMutation.mutate(key.id)}
+                          >
+                            <ShieldAlert className="h-4 w-4" />
+                            Revoke
+                          </Button>
+                        </div>
                       )}
                     </li>
                   );
@@ -290,6 +328,22 @@ export default function OrganizationApiKeysPage() {
                 {revokeMutation.error instanceof Error
                   ? revokeMutation.error.message
                   : "Could not revoke the key."}
+              </p>
+            )}
+            {rotateMutation.isError && (
+              <p className="text-sm text-red-700 mt-3" role="alert">
+                {rotateMutation.error instanceof Error
+                  ? rotateMutation.error.message
+                  : "Could not rotate the key."}
+              </p>
+            )}
+            {PLANNED_API_SCOPES.length > 0 && (
+              <p className="text-xs text-gray-500 mt-4">
+                Not yet available (the server refuses to issue a scope with no
+                endpoint enforcing it):{" "}
+                <code className="font-mono">
+                  {PLANNED_API_SCOPES.join(", ")}
+                </code>
               </p>
             )}
           </Section>

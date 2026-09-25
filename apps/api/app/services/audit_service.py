@@ -140,6 +140,29 @@ EVENT_CRITICALITY: dict[str, str] = {
     "RATE_LIMITED": Criticality.OPERATIONAL,
     "SECURITY_INCIDENT_MODE": Criticality.SECURITY_CRITICAL,
     "ADMIN_CONFIGURATION_CHANGED": Criticality.SECURITY_CRITICAL,
+    # ── V4.1 external boundary (closed world; do not add casually) ──────
+    # API-key lifecycle. SECURITY-CRITICAL: a credential gain/loss must
+    # commit atomically with its audit event.
+    "API_KEY_CREATED": Criticality.SECURITY_CRITICAL,
+    "API_KEY_ROTATED": Criticality.SECURITY_CRITICAL,
+    "API_KEY_REVOKED": Criticality.SECURITY_CRITICAL,
+    "API_KEY_EXPIRED": Criticality.SECURITY_CRITICAL,
+    # Inbound webhook lifecycle. Rejections are SECURITY-CRITICAL (an
+    # attacker-visible refusal must be on the record); acceptance is
+    # OPERATIONAL (the scan request itself re-audits).
+    "WEBHOOK_RECEIVED": Criticality.OPERATIONAL,
+    "WEBHOOK_ACCEPTED": Criticality.OPERATIONAL,
+    "WEBHOOK_REJECTED": Criticality.SECURITY_CRITICAL,
+    "WEBHOOK_REPLAY_REJECTED": Criticality.SECURITY_CRITICAL,
+    # CI event lifecycle.
+    "CI_EVENT_RECEIVED": Criticality.OPERATIONAL,
+    "CI_EVENT_REJECTED": Criticality.SECURITY_CRITICAL,
+    # Analysis request submitted through the public API.
+    "SCAN_REQUESTED": Criticality.OPERATIONAL,
+    # Idempotency conflict (a caller probing key reuse).
+    "IDEMPOTENCY_CONFLICT": Criticality.OPERATIONAL,
+    # Quota enforcement.
+    "QUOTA_LIMIT_REACHED": Criticality.OPERATIONAL,
 }
 
 # Legacy V1–V3.6 audit_events types that the existing producers emit.
@@ -378,21 +401,19 @@ async def get_or_create_chain(db: AsyncSession, *, installation_id) -> AuditChai
     ).scalar_one_or_none()
     if chain is not None:
         return chain
-    db.add(AuditChain(installation_id=iid))
+    # SAVEPOINT-scoped insert: when a concurrent creator wins, the UNIQUE
+    # backstop aborts only the savepoint — NEVER the caller's transaction,
+    # which may already hold flushed security state (e.g. an API key row
+    # awaiting its fail-closed audit witness). A full rollback here would
+    # silently destroy that state while the caller still reports success.
     try:
-        await db.flush()
+        async with db.begin_nested():
+            db.add(AuditChain(installation_id=iid))
+            await db.flush()
     except Exception:
         # Concurrent creator won (UNIQUE installation_id). Re-read the
         # winner inside this transaction and continue.
-        await db.rollback()
-        chain = (
-            await db.execute(
-                select(AuditChain).where(AuditChain.installation_id == iid)
-            )
-        ).scalar_one_or_none()
-        if chain is None:
-            raise
-        return chain
+        pass
     return (
         await db.execute(
             select(AuditChain).where(AuditChain.installation_id == iid)
@@ -400,10 +421,45 @@ async def get_or_create_chain(db: AsyncSession, *, installation_id) -> AuditChai
     ).scalar_one()
 
 
+async def get_or_create_organization_chain(
+    db: AsyncSession, *, organization_id
+) -> AuditChain:
+    """V4.1 — resolve the per-ORGANIZATION chain (concurrency-safe).
+
+    An organization may hold ZERO installations (a key-only tenant), yet
+    its key lifecycle and public-API events must still be hash-chained.
+    This chain is installation_id = NULL, organization_id = org PK. Same
+    race discipline as the installation chain: the UNIQUE(organization_id)
+    index decides the winner.
+    """
+    oid = _norm_uuid(organization_id)
+    chain = (
+        await db.execute(
+            select(AuditChain).where(AuditChain.organization_id == oid)
+        )
+    ).scalar_one_or_none()
+    if chain is not None:
+        return chain
+    # SAVEPOINT-scoped insert — same discipline as get_or_create_chain:
+    # a lost creation race must never roll back the caller's transaction.
+    try:
+        async with db.begin_nested():
+            db.add(AuditChain(organization_id=oid))
+            await db.flush()
+    except Exception:
+        pass
+    return (
+        await db.execute(
+            select(AuditChain).where(AuditChain.organization_id == oid)
+        )
+    ).scalar_one()
+
+
 async def emit_security_event(
     db: AsyncSession,
     *,
-    installation_id,
+    installation_id=None,
+    organization_id=None,
     event_type: str,
     actor_type: str = ActorType.SYSTEM,
     actor_id: Optional[str] = None,
@@ -446,34 +502,41 @@ async def emit_security_event(
     last_error: Optional[Exception] = None
     for _attempt in range(3):
         try:
-            return await _emit_event_locked(
-                db,
-                installation_id=installation_id,
-                registered=registered,
-                actor_type=actor_type,
-                actor_id=actor_id,
-                actor_user_id=actor_user_id,
-                repository_id=repository_id,
-                action_id=action_id,
-                authorization_id=authorization_id,
-                execution_run_id=execution_run_id,
-                verification_id=verification_id,
-                rollback_id=rollback_id,
-                reason_code=reason_code,
-                result=result,
-                payload=payload,
-                occurred_at=occurred_at,
-                event_version=event_version,
-            )
+            # SAVEPOINT per attempt: a lost sequencing race aborts only the
+            # append attempt, never the caller's transaction — which may
+            # already hold flushed security state (e.g. an API key row
+            # awaiting this fail-closed witness). A full rollback here
+            # would discard that state while the caller still reports
+            # success, minting a credential that was never persisted.
+            async with db.begin_nested():
+                return await _emit_event_locked(
+                    db,
+                    installation_id=installation_id,
+                    organization_id=organization_id,
+                    registered=registered,
+                    actor_type=actor_type,
+                    actor_id=actor_id,
+                    actor_user_id=actor_user_id,
+                    repository_id=repository_id,
+                    action_id=action_id,
+                    authorization_id=authorization_id,
+                    execution_run_id=execution_run_id,
+                    verification_id=verification_id,
+                    rollback_id=rollback_id,
+                    reason_code=reason_code,
+                    result=result,
+                    payload=payload,
+                    occurred_at=occurred_at,
+                    event_version=event_version,
+                )
         except Exception as exc:
             last_error = exc
             if not _is_sequencing_race(exc):
                 raise
-            # A lost sequencing race is retried from a clean transaction:
-            # the unique (chain_id, seq/prev_digest) backstop only fires once
-            # the competing append has committed, so a fresh transaction is
-            # required for the retry to observe the new head.
-            await db.rollback()
+            # A lost sequencing race is retried from a clean savepoint:
+            # the unique (chain_id, seq/prev_digest) backstop only fires
+            # once the competing append has committed, so a fresh
+            # savepoint is required for the retry to observe the new head.
     raise last_error if last_error else AuditEventError("audit append failed")
 
 
@@ -486,6 +549,7 @@ def _is_sequencing_race(exc: Exception) -> bool:
         return any(marker in text_ for marker in (
             "uq_audit_chain_events_seq", "uq_audit_chain_events_prev",
             "uq_audit_checkpoints_seq", "audit_chains_installation_id_key",
+            "audit_chains_organization_id_key",
         ))
     return False
 
@@ -494,6 +558,7 @@ async def _emit_event_locked(
     db: AsyncSession,
     *,
     installation_id,
+    organization_id,
     registered: str,
     actor_type: str,
     actor_id: Optional[str],
@@ -512,8 +577,20 @@ async def _emit_event_locked(
 ) -> tuple[bool, Optional[str]]:
     """Single append attempt. The chain row lock is taken before the
     head is read, so concurrent appends to one chain serialize on the
-    row (no global lock across tenants)."""
-    chain = await get_or_create_chain(db, installation_id=installation_id)
+    row (no global lock across tenants).
+
+    V4.1: exactly one chain owner must be supplied — an installation
+    (tenant boundary with repositories) or an organization (key-only
+    boundary for API-key lifecycle and public-API events). Supplying
+    neither is a programming error and fails closed."""
+    if installation_id is not None:
+        chain = await get_or_create_chain(db, installation_id=installation_id)
+    elif organization_id is not None:
+        chain = await get_or_create_organization_chain(db, organization_id=organization_id)
+    else:
+        raise AuditEventError(
+            "audit event requires installation_id or organization_id"
+        )
     await db.execute(
         select(AuditChain.id).where(AuditChain.id == chain.id).with_for_update()
     )

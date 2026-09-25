@@ -236,25 +236,109 @@ def membership_manageable_by(actor_role: Optional[str]) -> bool:
     return role_has_capability(actor_role, CAP_MANAGE_MEMBERS)
 
 
-# ── API key scopes (Phase 23/24) ─────────────────────────────────────
-# API-key scopes are deliberately narrower than member capabilities:
-# a key may never manage members, policy, operations, or transfer/delete
-# an organization, and may never perform high-impact mutations unless the
+# ── API key scopes (V4.0 Phase 23/24; V4.1 Phase 5/6) ─────────────────
+#
+# API-key scopes are deliberately narrower than member capabilities: a key
+# may never manage members, policy, operations, or transfer/delete an
+# organization, and may never perform a high-impact mutation unless the
 # scope is explicitly issued.
+#
+# THREE RULES that keep this list honest:
+#
+# 1. A scope is a CLOSED WORLD. `is_valid_api_scope` rejects anything not
+#    listed here, so a caller cannot invent a scope name and have it
+#    accepted.
+# 2. A scope grants nothing by itself. It gates an ENDPOINT that exists;
+#    the endpoint independently re-checks organization membership and, for
+#    anything with side effects, the full V3 chain (policy → approval →
+#    authorization → ...). Holding `executions:create` is permission to
+#    ASK, never permission to execute.
+# 3. There is no `admin:*`. Administration is not reachable with a key at
+#    all: no scope can manage members, policy, or operations.
+#
+# Every scope below is backed by a live endpoint (see docs/v4-public-api.md
+# §"Scope → endpoint backing"); a scope with no endpoint would be an
+# advertisement of a control that does not exist.
 
 API_SCOPES: frozenset[str] = frozenset({
-    "findings:read",
+    # Read
     "repositories:read",
+    "findings:read",
+    "scans:read",
     "actions:read",
-    "actions:create",
     "executions:read",
+    "verifications:read",
+    "rollback:read",
     "audit:read",
-    "audit:export",
+    "integrations:read",
+    # Verification (read-only analysis of existing history, side-effect free)
+    "audit:verify",
+    # Mutation: submits an analysis REQUEST only. The V3 chain still decides
+    # everything that follows; this scope can never execute a remediation.
+    "scans:create",
 })
 
-HIGH_IMPACT_API_SCOPES: frozenset[str] = frozenset({
-    "actions:create", "audit:export",
+# Scopes that are DESIGNED but deliberately NOT ISSUABLE yet, because the
+# endpoint that would enforce them does not exist. They are listed here so
+# the roadmap is explicit and so nothing silently starts accepting them.
+# A scope that grants nothing is harmless; a scope ADVERTISED as a control
+# that does not exist is not. See docs/v4-public-api.md.
+PLANNED_API_SCOPES: frozenset[str] = frozenset({
+    "findings:write",      # needs a finding-mutation endpoint
+    "actions:create",      # needs the request-only action submission endpoint
+    "executions:create",   # needs the async execution-request endpoint (Phase 38/51)
+    "rollback:create",     # needs the request-only rollback endpoint (Phase 40)
+    "integrations:manage", # needs the integration-mutation endpoint
+    "audit:export",        # needs the streaming export endpoint (Phase 41)
 })
+
+# Scopes whose issuance is an administrative act, and whose use has a
+# side effect or reaches sensitive history. Issuing one requires at least
+# ORG_ADMIN standing (enforced in api_key_service.create_api_key).
+HIGH_IMPACT_API_SCOPES: frozenset[str] = frozenset({
+    "scans:create",
+})
+
+# Scopes that only read. Used by the public API's rate-limit classing so a
+# read storm cannot exhaust a mutation budget (and vice versa).
+READ_API_SCOPES: frozenset[str] = frozenset({
+    "repositories:read",
+    "findings:read",
+    "scans:read",
+    "actions:read",
+    "executions:read",
+    "verifications:read",
+    "rollback:read",
+    "audit:read",
+    "audit:verify",
+    "integrations:read",
+})
+
+
+def is_planned_api_scope(scope: object) -> bool:
+    """A designed-but-not-issuable scope. Used by tests and the console."""
+    return isinstance(scope, str) and scope in PLANNED_API_SCOPES
+
+# Scopes that are administrative in effect but are NOT grantable through a
+# key without ORG_ADMIN standing. Expressed explicitly so the console and
+# the docs share one source of truth.
+ADMIN_STANDING_API_SCOPES: frozenset[str] = HIGH_IMPACT_API_SCOPES
+
+
+def is_read_scope(scope: object) -> bool:
+    return isinstance(scope, str) and scope in READ_API_SCOPES
+
+
+def key_is_read_only(scopes: object) -> bool:
+    """True when a key's scopes confer no side effect at all.
+
+    Fails closed: an unrecognised or empty scope set is NOT read-only.
+    """
+    if not isinstance(scopes, list) or not scopes:
+        return False
+    if not scopes_are_valid(scopes):
+        return False
+    return all(s in READ_API_SCOPES for s in scopes)
 
 
 def is_valid_api_scope(scope: object) -> bool:

@@ -516,7 +516,11 @@ class TestOrganizationRoutes:
         r = client.get("/api/v1/repositories",
                        headers={"Authorization": f"Bearer {secret}"})
         assert r.status_code == 200
-        assert len(r.json()) == 1
+        # V4.1: public collections are paginated envelopes, not bare arrays
+        # (an unbounded array let one tenant force an unbounded read).
+        body = r.json()
+        assert set(body) >= {"items", "next_cursor", "has_more"}
+        assert len(body["items"]) == 1
 
         # findings:read was NOT granted → 403.
         r2 = client.get("/api/v1/findings",
@@ -558,5 +562,5 @@ class TestOrganizationRoutes:
         r = client.get("/api/v1/repositories",
                        headers={"Authorization": f"Bearer {secret}"})
         assert r.status_code == 200
-        names = [row["name"] for row in r.json()]
+        names = [row["name"] for row in r.json()["items"]]
         assert names == ["a-repo"]

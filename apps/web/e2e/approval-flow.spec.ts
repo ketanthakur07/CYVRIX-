@@ -135,9 +135,26 @@ test.describe("V3.2 Approval — UI inspection", () => {
     const reject = page.getByRole("button", { name: "REJECT", exact: true });
     await expect(approve).toBeVisible();
     await expect(reject).toBeVisible();
-    const body = (await page.content()).toLowerCase();
+    // Ban execution-shaped CONTROLS, not prose: the page's security copy
+    // legitimately explains that "approval is NOT execution", so scan
+    // interactive elements (buttons, links, link targets) only.
+    const controlText = (
+      await page
+        .locator("button, a, [role=button], input[type=submit]")
+        .allTextContents()
+    )
+      .join(" ")
+      .toLowerCase();
+    const linkTargets = (
+      await page
+        .locator("a")
+        .evaluateAll((els) =>
+          els.map((e) => (e as HTMLAnchorElement).href).join(" ")
+        )
+    ).toLowerCase();
     for (const banned of ["approve all", "fix it", "execute", "run now", "apply fix"]) {
-      expect(body, `banned control: ${banned}`).not.toContain(banned);
+      expect(controlText, `banned control: ${banned}`).not.toContain(banned);
+      expect(linkTargets, `banned link target: ${banned}`).not.toContain(banned);
     }
   });
 

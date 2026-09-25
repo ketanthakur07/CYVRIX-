@@ -64,6 +64,17 @@ class Settings(BaseSettings):
     ops_rate_limit_per_hour: int = 30
     ops_reconciliation_rate_limit_per_hour: int = 10
 
+    # V4.1 — inbound GitHub webhooks (signature + replay + binding)
+    # The secret is the GitHub App webhook secret; empty DISABLES webhook
+    # ingestion entirely (fail closed: an unsigned intake is never offered).
+    webhook_max_payload_bytes: int = 10_485_760  # 10 MiB (GitHub bound is ~25 MiB)
+    webhook_rate_limit_per_hour: int = 1200      # per organization
+    webhook_ip_rate_limit_per_hour: int = 240    # pre-authentication, per source IP
+
+    # V4.1 — organization quotas (server-owned; no client can raise them)
+    quota_scans_org_per_day: int = 200
+    quota_scans_global_per_day: int = 5000
+
     # V3.8 audit integrity. The checkpoint MAC key is deliberately NOT a
     # database value: it lives in configuration (outside the attacker's
     # DB write reach). Empty disables checkpointing (chain stays
@@ -135,6 +146,8 @@ class Settings(BaseSettings):
         "ops_rate_limit_per_hour",
         "ops_reconciliation_rate_limit_per_hour",
         "audit_alert_rate_limit_per_hour",
+        "webhook_rate_limit_per_hour",
+        "webhook_ip_rate_limit_per_hour",
     )
     @classmethod
     def validate_ops_limits_positive(cls, v: int, info) -> int:
@@ -151,6 +164,8 @@ class Settings(BaseSettings):
             "ops_rate_limit_per_hour": (1, 1_000),
             "ops_reconciliation_rate_limit_per_hour": (1, 1_000),
             "audit_alert_rate_limit_per_hour": (1, 10_000),
+            "webhook_rate_limit_per_hour": (1, 100_000),
+            "webhook_ip_rate_limit_per_hour": (1, 100_000),
         }
         low, high = bounds[info.field_name]
         if not isinstance(v, int) or v < low or v > high:

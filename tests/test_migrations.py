@@ -92,6 +92,30 @@ class TestSchemaCompleteness:
         )
 
     @pytest.mark.asyncio
+    async def test_v41_idempotency_table_exists_with_its_invariants(self, engine):
+        """V4.1 `api_idempotency_keys`.
+
+        The unique constraint is the mechanism that makes a concurrent
+        duplicate deterministic, so its presence is asserted, not assumed.
+        """
+        async with engine.connect() as conn:
+            tables = set(await conn.run_sync(
+                lambda sync_conn: inspect(sync_conn).get_table_names()
+            ))
+            columns = {
+                c["name"]
+                for c in await conn.run_sync(
+                    lambda sync_conn: inspect(sync_conn).get_columns("api_idempotency_keys")
+                )
+            }
+        assert "api_idempotency_keys" in tables
+        assert {
+            "organization_id", "scope", "key_value", "request_digest",
+            "state", "response_status", "response_body", "expires_at",
+            "actor_api_key_prefix", "created_at", "completed_at",
+        } <= columns, columns
+
+    @pytest.mark.asyncio
     async def test_github_installations_have_organization_id(self, engine):
         """V4 tenancy binding on the existing integration table (additive)."""
         async with engine.connect() as conn:

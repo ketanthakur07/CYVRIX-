@@ -22,6 +22,73 @@ Each phase ships with its tests before the next begins. Nothing in any phase gra
 | **V3.10** | Full security/E2E validation | E2E browser→proposal→approval→execution→verification→audit; adversarial suite (malicious repo, escalation attempts); acceptance gates all checked |
 | **V4.0** | Multi-tenant platform foundation — **IMPLEMENTED (docs/v4-architecture.md, docs/v4-multitenancy.md, docs/v4-rbac.md, docs/v4-api.md, docs/v4-security.md, docs/v4-threat-model.md): organizations/memberships/invitations, roles→capabilities with last-owner protection, versioned per-org policy revisions, hashed+scoped+revocable API keys, org-scoped rate limits, a versioned read-only `/api/v1`, and an org-context console (`/orgs`, members, API keys, settings, invitation accept). Migration 012 is additive and backfills a personal organization per existing user. V4 EXTENDS the V3 chain — a capability invokes a gate and never removes one** | Tenancy/IDOR tests, concurrency races, migration certification on real PostgreSQL, org rate-limit isolation on real Redis, RBAC fail-closed client tests — verified: V4 platform 71 passed, V4 races 99 passed, org rate limits 7 passed (real Redis), migration 012 certified fresh + V3→V4 backfill + downgrade/re-upgrade on real PG, gated V3 suites green (`test_git_remediation_races.py` 53 passed; `test_sandbox_real_container.py` 12 passed on real Linux containers), Jest 169 passed, `tsc --noEmit` clean, `next build` clean |
 
+### V4.1 — Public API + CI/CD integration: **IMPLEMENTED (external boundary complete)**
+
+Delivered (increment 1 — "external API foundation"):
+
+- public error contract for `/api/v1` (`detail` preserved; `code`,
+  `message`, `request_id` added) — `docs/v4-public-api.md` §7
+- honest scope registry: unbacked scopes moved to `PLANNED_API_SCOPES` and
+  refused at issuance; no `admin:*`
+- API-key **rotation** (old key dies immediately; successor preserves
+  scopes and expiry; deterministic under concurrency)
+- shared **idempotency / replay primitive** (migration 013,
+  `api_idempotency_keys`) with same-key/same-request replay,
+  same-key/different-request conflict, and tenant-scoped records
+- bounded **cursor pagination** + allowlisted filters + rate-limit headers
+- 11 new public read endpoints and one idempotent `POST /api/v1/scans`
+  (202, request-only — never executes)
+- OpenAPI: `ApiKeyBearer` declared on every public operation
+
+Delivered (increment 2 — "external integration boundary"):
+
+- inbound **GitHub webhooks** (`docs/v4-webhooks.md`): `POST
+  /api/webhooks/github` — HMAC-SHA-256 signature verification
+  (constant-time, fail-closed on unconfigured secret), delivery-id replay
+  protection on the 013 primitive, event allowlist
+  (push/pull_request/installation/installation_repositories), installation
+  → organization → repository binding resolved ONLY from trusted DB state,
+  bounded intake (10 MiB, per-IP + per-org flood control), structured
+  payload-free delivery records
+- **CI/CD integration** (`docs/v4-cicd.md`): thin GitHub Action (least
+  privilege `contents: read`, scoped key only), commit-bound scan
+  submission, polling of SERVER-computed results, fail-closed on
+  unavailability — CI can never declare its own security outcome
+- **commit binding**: `POST /api/v1/scans` accepts an optional full-hex
+  `commit_sha`; the WORKER verifies it against the actual clone and fails
+  the scan with `COMMIT_MISMATCH` before any analysis — stale CI/webhook
+  events are never silently attributed to the wrong commit
+- **async job status**: `GET /api/v1/scans/{scan_id}/status` with
+  server-computed `result` (PASS/FAIL/null/INCONCLUSIVE) and
+  `commit_binding` states (`docs/v4-async-jobs.md`)
+- **audit integration**: API-key lifecycle (created/rotated fail-closed,
+  revoked witnessed) + webhook lifecycle + scan requests chained into V3.8
+  via new per-ORGANIZATION chains (key-only tenants now have verifiable
+  history); tamper evidence inherited and tested
+- **quotas** (`docs/v4-quotas.md`): atomic Redis counters, GLOBAL →
+  ORGANIZATION precedence, compensated refusals, fail-closed, verified
+  with 12-way concurrency on real Redis
+- **metrics** (`docs/v4-metrics.md`): closed-world counter/gauge/summary
+  registry with bounded content-free labels, Prometheus exposition on the
+  capability-gated `GET /api/ops/metrics`
+- failure-injection suite (Redis/queue/audit failures — all fail closed),
+  boundary race suite (quota × concurrency, webhook × replay, audit ×
+  concurrency, all real PostgreSQL + Redis), V4.1 Playwright spec
+  (`e2e/v41-external-boundary.spec.ts`)
+
+Remaining (explicit, not claimed):
+
+- outbound webhooks (signing, delivery, retry, dead-letter)
+- dedicated CI-event intake with `CI_EVENT_*` audit events (CI integrates
+  today via commit-bound scan submission)
+- request-only endpoints for `actions:create`, `executions:create`,
+  `rollback:create`, `integrations:manage`, `audit:export` (scopes stay
+  unissuable until then)
+- worker-side export of `queue_depth`/`active_jobs` gauges
+- bounded load-test harness at platform scale
+
+---
+
 Order rationale: authorization-critical primitives (model, policy, approval, digest) precede any infrastructure capable of side effects; sandbox precedes git; verification precedes rollback usage; audit hardening precedes UI trust surfaces.
 
 ---

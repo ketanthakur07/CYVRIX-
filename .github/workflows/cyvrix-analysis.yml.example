@@ -1,0 +1,44 @@
+name: CYVRIX security analysis (example workflow)
+
+# CYVRIX V4.1 CI/CD integration — example workflow for consumer repositories.
+#
+# Security properties (docs/v4-cicd.md is normative):
+# - LEAST PRIVILEGE: `contents: read` is the maximum this workflow needs.
+#   There is NO contents:write, NO packages, NO secrets scope: the Action
+#   performs analysis requests only and can never mutate the repository.
+# - COMMIT-BOUND: the Action submits GITHUB_SHA (the exact commit the
+#   workflow checked out); CYVRIX verifies the binding server-side at
+#   clone time (a stale request fails COMMIT_MISMATCH, it is never
+#   silently attached to a newer commit).
+# - FAIL-CLOSED: if CYVRIX is unreachable, times out, or returns anything
+#   other than a server-computed PASS, the step FAILS. CYVRIX can never
+#   be bypassed by a network error; the workflow declares no security
+#   result of its own.
+# - CREDENTIAL SCOPE: CYVRIX_API_KEY is a scoped CYVRIX API key
+#   (`scans:read`, `scans:create`) — it can read this organization's
+#   security state and request analysis. It cannot approve, authorize,
+#   execute, roll back, or administer anything (no such scope exists).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  cyvrix-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the analyzed commit
+        uses: actions/checkout@v4
+        with:
+          # The exact commit the analysis will be bound to.
+          fetch-depth: 1
+
+      - name: Request CYVRIX analysis (fail-closed gate)
+        uses: ./.github/actions/cyvrix-ci
+        env:
+          CYVRIX_API_URL: ${{ vars.CYVRIX_API_URL }}
+          CYVRIX_API_KEY: ${{ secrets.CYVRIX_API_KEY }}
