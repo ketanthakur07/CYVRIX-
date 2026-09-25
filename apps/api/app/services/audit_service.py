@@ -772,7 +772,25 @@ async def verify_chain(
         .order_by(AuditCheckpoint.through_sequence.asc())
     )).scalars().all())
     key = get_settings().audit_checkpoint_key
-    return verify_chain_rows(rows, cps, key if key else None)
+    result = verify_chain_rows(rows, cps, key if key else None)
+    # V3.8 §16 — integrity failures must alert without a caller having to
+    # inspect the verdict. Structured and content-free on purpose: only
+    # the chain id prefix, checked count, and machine-readable issue codes
+    # are logged — never event payloads ("alerts carry no event contents").
+    if result.status == "INVALID":
+        codes = sorted({i.code for i in result.issues})
+        if any(c.startswith("CHECKPOINT_") for c in codes):
+            logger.error(
+                "audit_chain_checkpoint_mismatch chain=%s checked=%d codes=%s",
+                str(chain_id)[:8], result.checked_events, ",".join(codes))
+        logger.error(
+            "audit_chain_verification_failed chain=%s checked=%d codes=%s",
+            str(chain_id)[:8], result.checked_events, ",".join(codes))
+    elif result.status == "UNSUPPORTED_VERSION":
+        logger.error(
+            "audit_chain_unsupported_version chain=%s checked=%d",
+            str(chain_id)[:8], result.checked_events)
+    return result
 
 
 # ── Export (Phase 27/28) — deterministic NDJSON, independently verifiable
