@@ -241,6 +241,9 @@ def run_log_analysis(scan_id: str):
 
     except Exception as e:
         error_msg = f"LOG_ANALYSIS_FAILED: {str(e)[:200]}"
+        # A failed mid-pipeline flush leaves the session poisoned; the
+        # failure handler must rollback before writing terminal state.
+        db.rollback()
         if scan is not None:
             _fail_scan(db, scan, error_msg)
         logger.error("log_analysis_failed scan_id=%s error=%s", scan_id, str(e)[:200])
@@ -424,6 +427,9 @@ def run_scan(scan_id: str):
 
     except Exception as e:
         error_msg = f"SCAN_FAILED: {str(e)[:200]}"
+        # A failed mid-pipeline flush leaves the session poisoned; the
+        # failure handler must rollback before writing terminal state.
+        db.rollback()
         if scan is not None:
             _fail_scan(db, scan, error_msg)
         logger.error("scan_failed scan_id=%s error=%s", scan_id, str(e)[:200])
@@ -497,11 +503,24 @@ def _run_investigations(db, scan, finding_ids, installation, repo, settings) -> 
             _compute_risk(db, finding, None)
             continue
 
-        investigation = Investigation(
-            finding_id=fid,
-            status="RUNNING",
-        )
-        db.add(investigation)
+        # Findings are deduplicated by fingerprint across scans, so a
+        # finding may already carry an investigation (1:1 unique
+        # constraint) from a previous scan of the same repository.
+        # Reuse and re-run that row instead of inserting a duplicate:
+        # a duplicate INSERT violates the constraint, poisons the
+        # session, and leaves the scan stuck non-terminal (V4.1
+        # release-certification regression).
+        investigation = db.execute(
+            select(Investigation).where(Investigation.finding_id == fid)
+        ).scalar_one_or_none()
+        if investigation is None:
+            investigation = Investigation(
+                finding_id=fid,
+                status="RUNNING",
+            )
+            db.add(investigation)
+        else:
+            investigation.status = "RUNNING"
         db.commit()
 
         try:

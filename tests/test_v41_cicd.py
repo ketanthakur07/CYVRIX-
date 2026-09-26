@@ -26,7 +26,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "apps", "api"))
 from sqlalchemy import select
 
 from app.models import (
+    Finding,
     GithubInstallation,
+    Investigation,
     Repository,
     Scan,
 )
@@ -415,3 +417,380 @@ class TestCIPipelineMapping:
             source = f.read()
         assert "contents: read" in source
         assert "contents: write" not in source
+
+
+# ── Worker rescan durability (V4.1 release-certification regression) ──
+
+
+def _run(coro):
+    """Run a coroutine on a dedicated fresh event loop.
+
+    The worker pipeline calls asyncio.run() internally, which UNSETS the
+    thread's current event loop on exit — a subsequent
+    asyncio.get_event_loop() would raise on Python 3.12. A dedicated
+    loop per call makes the stub independent of that global state."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+class _ExecResult:
+    """Minimal result facade for the worker's ``db.execute(select(...))``
+    call sites (scalar_one_or_none / scalars().all)."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def scalar_one_or_none(self):
+        return self._rows[0] if self._rows else None
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return list(self._rows)
+
+
+class _RescanSessionStub:
+    """Sync-session facade over the async test DB for the worker's
+    run_scan pipeline (same spirit as _StubScanDB above, but able to run
+    the full persist/investigate/risk flow in-process).
+
+    - get() returns cached detached copies the worker can mutate
+    - add()/flush() insert genuinely new rows (Findings, Investigations,
+      RiskAssessments, Recommendations, AuditEvents) into the real DB
+    - commit() syncs worker-side Scan mutations (status/timestamps/errors)
+    - execute() translates the pipeline's simple select(...) filters into
+      real queries so fingerprint dedup and investigation reuse hit the
+      actual database constraint semantics
+    """
+
+    def __init__(self, factory, scan_id, *, poison_commits=False):
+        self._factory = factory
+        self._scan_id = scan_id
+        self._objects = {}  # (model, str(pk)) -> detached object
+        self._pending = []
+        self._poison_commits = poison_commits
+        self._poisoned = poison_commits
+
+    def get(self, model, pk):
+        return _run(self._load(model, pk))
+
+    async def _load(self, model, pk):
+        key = (model, str(pk))
+        if key in self._objects:
+            return self._objects[key]
+        async with self._factory() as s:
+            row = await s.get(model, pk)
+            if row is None:
+                return None
+            if model is Repository:
+                inst = await s.get(GithubInstallation, row.installation_id)
+                s.expunge(inst)
+            s.expunge(row)
+        if model is Repository:
+            obj = Repository(
+                id=row.id, installation_id=row.installation_id,
+                github_repo_id=row.github_repo_id, owner=row.owner,
+                name=row.name, default_branch=row.default_branch,
+                is_active=row.is_active,
+            )
+            obj.installation = inst
+        else:
+            obj = row
+        self._objects[key] = obj
+        return obj
+
+    def add(self, obj):
+        self._pending.append(obj)
+
+    def flush(self):
+        self._sync()
+
+    def commit(self):
+        if self._poisoned:
+            from sqlalchemy.exc import PendingRollbackError
+            raise PendingRollbackError("simulated poisoned session (failed flush)")
+        self._sync()
+
+    def rollback(self):
+        # Mirrors real session semantics: rollback recovers a session
+        # whose flush failed.
+        self._poisoned = False
+
+    def close(self):
+        pass
+
+    def execute(self, stmt):
+        return _run(self._execute(stmt))
+
+    async def _execute(self, stmt):
+        entity = stmt.column_descriptions[0]["entity"]
+        wc = stmt.whereclause
+        clauses = list(wc.clauses) if hasattr(wc, "clauses") else ([] if wc is None else [wc])
+        filters = {crit.left.key: crit.right.value for crit in clauses}
+        async with self._factory() as s:
+            rows = (await s.execute(select(entity).filter_by(**filters))).scalars().all()
+            for r in rows:
+                s.expunge(r)
+                # Register so later worker-side mutations are persisted
+                # by commit(), exactly like an attached session object.
+                self._objects[(type(r), str(r.id))] = r
+        return _ExecResult(rows)
+
+    def _sync(self):
+        _run(self._sync_async())
+
+    async def _sync_async(self):
+        # Mirror real session semantics: commit() persists BOTH pending
+        # inserts and attribute mutations on already-tracked (attached)
+        # objects. merge() copies the detached object's current column
+        # values into the managed row. Only models the pipeline actually
+        # mutates are merged back — Repository/Installation are read-only
+        # here (and Repository is a reconstructed subset view).
+        mutable = (Scan, Finding, Investigation)
+        async with self._factory() as s:
+            if self._pending:
+                for obj in self._pending:
+                    s.add(obj)
+                await s.flush()
+                for obj in self._pending:
+                    s.expunge(obj)
+                    self._objects[(type(obj), str(obj.id))] = obj
+                self._pending.clear()
+            for (model, _pk), obj in list(self._objects.items()):
+                if model in mutable:
+                    await s.merge(obj)
+            await s.commit()
+
+
+async def _seed_rescan_tenant(session_factory, user):
+    async with session_factory() as s:
+        inst = GithubInstallation(
+            user_id=user.id, installation_id=uuid4().int % 900000 + 1,
+            account_login="rescan-acme", account_type="Organization",
+        )
+        s.add(inst)
+        await s.flush()
+        repo = Repository(
+            installation_id=inst.id, github_repo_id=uuid4().int % 900000 + 1,
+            owner=f"rescan-acme-{uuid4().hex[:8]}", name="repo", default_branch="main",
+            is_active=True,
+        )
+        s.add(repo)
+        await s.flush()
+        scan = Scan(
+            repository_id=repo.id, status="QUEUED", trigger="manual",
+            requested_commit_sha="a" * 40,
+        )
+        s.add(scan)
+        await s.commit()
+        return {"repo_id": repo.id, "scan_id": scan.id}
+
+
+async def _seed_rescan_scan(session_factory, repo_id):
+    """A second scan of the SAME repository (the re-scan scenario)."""
+    async with session_factory() as s:
+        scan = Scan(
+            repository_id=repo_id, status="QUEUED", trigger="manual",
+            requested_commit_sha="a" * 40,
+        )
+        s.add(scan)
+        await s.commit()
+        return {"scan_id": scan.id}
+
+
+class TestWorkerRescanDurability:
+    """Re-scanning a repository must reuse findings (fingerprint dedup)
+    without colliding with the 1:1 investigations constraint, and a
+    mid-pipeline crash must still leave terminal scan state.
+
+    Regression: the second scan of a repository crashed with
+    UniqueViolation(investigations_finding_id_key) because the worker
+    re-inserted an Investigation row for a finding carried over from the
+    previous scan; the poisoned session then made _fail_scan itself raise
+    PendingRollbackError, RQ dead-lettered the job, and the scan was
+    stuck non-terminal forever (golden-path E2E TIMEOUT on rerun).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _import_worker(self):
+        worker_dir = os.path.join(
+            os.path.dirname(__file__), "..", "services", "worker"
+        )
+        if worker_dir not in sys.path:
+            sys.path.insert(0, os.path.abspath(worker_dir))
+        import app.models as models  # noqa: F401 — register metadata
+        from worker import tasks as worker_tasks
+        self.worker_tasks = worker_tasks
+
+    def _stub_pipeline(self, monkeypatch, session_factory, scan_id, *, poison=False):
+        wt = self.worker_tasks
+
+        async def _stub_token(*a, **k):
+            return "stub-token"
+
+        async def _stub_llm(*a, **k):
+            from app.schemas import InvestigationResult
+            return InvestigationResult(
+                verdict="LIKELY", exploitability="HIGH", exposure="EXTERNAL",
+                confidence=0.7, summary="stubbed investigation",
+                recommendation="upgrade the dependency",
+            )
+
+        monkeypatch.setattr(wt, "get_installation_access_token", _stub_token)
+        monkeypatch.setattr(wt, "clone_repo", lambda url, ws, branch: "a" * 40)
+        monkeypatch.setattr(wt, "_run_investigation_with_context", _stub_llm)
+
+        async def _stub_scan_repository(workspace, repo_id, scan_id_):
+            return {
+                "dependencies": [],
+                "findings": [{
+                    "fingerprint": self.fingerprint,
+                    "scanner": "dependency",
+                    "source_type": "DEPENDENCY",
+                    "vulnerability_id": "CVE-2026-0001",
+                    "package_name": "lodash",
+                    "package_version": "4.17.19",
+                    "title": "Prototype Pollution in lodash",
+                    "description": "Versions before 4.17.21 are vulnerable.",
+                    "severity": "HIGH",
+                    "evidence": {"manifest_path": "package.json"},
+                }],
+                "manifests_found": 1,
+                "total_deps": 0,
+                "parse_errors": [],
+            }
+
+        monkeypatch.setattr(wt, "scan_repository", _stub_scan_repository)
+        stub = _RescanSessionStub(session_factory, scan_id, poison_commits=poison)
+        monkeypatch.setattr(wt, "SessionLocal", lambda: stub)
+        return stub
+
+    def test_second_scan_reuses_investigation_row_and_completes(
+        self, session_factory, test_user, monkeypatch
+    ):
+        seed = _run(_seed_rescan_tenant(session_factory, test_user))
+        self.fingerprint = f"fp-rescan-{uuid4().hex[:12]}"
+
+        # Scan 1: creates the finding + its investigation.
+        self._stub_pipeline(monkeypatch, session_factory, seed["scan_id"])
+        result1 = self.worker_tasks.run_scan(str(seed["scan_id"]))
+        assert result1 == {"ok": True, "findings": 1}, result1
+
+        # Scan 2 of the SAME repository: fingerprint dedup carries the
+        # finding over; the investigation row must be reused, not re-inserted.
+        scan2 = _run(
+            _seed_rescan_scan(session_factory, seed["repo_id"])
+        )
+        self._stub_pipeline(monkeypatch, session_factory, scan2["scan_id"])
+        result2 = self.worker_tasks.run_scan(str(scan2["scan_id"]))
+        assert result2 == {"ok": True, "findings": 1}, result2
+
+        async def _assert_db():
+            from sqlalchemy import func
+            from app.models import Investigation as Inv, RiskAssessment as Risk
+            async with session_factory() as s:
+                scan_row = await s.get(Scan, scan2["scan_id"])
+                inv_count = (await s.execute(
+                    select(func.count()).select_from(Inv)
+                )).scalar_one()
+                risk_count = (await s.execute(
+                    select(func.count()).select_from(Risk)
+                )).scalar_one()
+            return scan_row.status, inv_count, risk_count
+
+        status, inv_count, risk_count = _run(_assert_db())
+        # Terminal state, exactly ONE investigation row (reused), and a
+        # risk assessment per scan run (historical rows are by design).
+        assert status == "COMPLETED", status
+        assert inv_count == 1, f"investigations must stay 1:1, got {inv_count}"
+        assert risk_count == 2, risk_count
+
+    def test_failed_investigation_then_rescan_still_recovers(
+        self, session_factory, test_user, monkeypatch
+    ):
+        from app.services.investigation import InvestigationError
+
+        seed = _run(
+            _seed_rescan_tenant(session_factory, test_user)
+        )
+        self.fingerprint = f"fp-rescan-{uuid4().hex[:12]}"
+
+        calls = {"n": 0}
+
+        async def _flaky_llm(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise InvestigationError("simulated LLM outage")
+            from app.schemas import InvestigationResult
+            return InvestigationResult(
+                verdict="LIKELY", exploitability="HIGH", exposure="EXTERNAL",
+                confidence=0.7, summary="recovered investigation",
+                recommendation="upgrade the dependency",
+            )
+
+        self._stub_pipeline(monkeypatch, session_factory, seed["scan_id"])
+        monkeypatch.setattr(
+            self.worker_tasks, "_run_investigation_with_context", _flaky_llm
+        )
+
+        # Scan 1: LLM fails (investigation row still exists, scan completes).
+        result1 = self.worker_tasks.run_scan(str(seed["scan_id"]))
+        assert result1 == {"ok": True, "findings": 1}, result1
+
+        # Scan 2: must reuse the FAILED investigation row (not insert a
+        # duplicate) and complete.
+        scan2 = _run(
+            _seed_rescan_scan(session_factory, seed["repo_id"])
+        )
+        self._stub_pipeline(monkeypatch, session_factory, scan2["scan_id"])
+        monkeypatch.setattr(
+            self.worker_tasks, "_run_investigation_with_context", _flaky_llm
+        )
+        result2 = self.worker_tasks.run_scan(str(scan2["scan_id"]))
+        assert result2 == {"ok": True, "findings": 1}, result2
+        assert calls["n"] == 2, calls
+
+        async def _assert_db():
+            from sqlalchemy import func
+            from app.models import Investigation as Inv
+            async with session_factory() as s:
+                scan_row = await s.get(Scan, scan2["scan_id"])
+                inv_count = (await s.execute(
+                    select(func.count()).select_from(Inv)
+                )).scalar_one()
+            return scan_row.status, inv_count
+
+        status, inv_count = _run(_assert_db())
+        assert status == "COMPLETED", status
+        assert inv_count == 1, inv_count
+
+    def test_scan_failure_handler_survives_poisoned_session(
+        self, session_factory, test_user, monkeypatch
+    ):
+        """The outer failure handler must rollback a poisoned session
+        before writing terminal state: the scan always ends FAILED with a
+        reason, and run_scan returns an error instead of raising (a raise
+        dead-letters the RQ job and leaves the scan non-terminal)."""
+        seed = _run(
+            _seed_rescan_tenant(session_factory, test_user)
+        )
+        self.fingerprint = f"fp-rescan-{uuid4().hex[:12]}"
+        self._stub_pipeline(
+            monkeypatch, session_factory, seed["scan_id"], poison=True
+        )
+
+        result = self.worker_tasks.run_scan(str(seed["scan_id"]))
+        assert "error" in result, result
+
+        async def _assert_db():
+            async with session_factory() as s:
+                scan_row = await s.get(Scan, seed["scan_id"])
+                return scan_row.status, scan_row.error_reason
+
+        status, error_reason = _run(_assert_db())
+        assert status == "FAILED", status
+        assert error_reason and "SCAN_FAILED" in error_reason, error_reason
