@@ -74,7 +74,7 @@ async def start_remediation(
 
     Server-side guarantees: ownership chain; kill switch; run must be
     RESULT_READY/COMPLETED with host-side scope verification; digest
-    recomputed; exactly-once per run (UNIQUE) and one live pipeline per
+    recomputed; at-most-once per run (UNIQUE guard) and one live pipeline per
     authorization; server-generated remediation branch; server-derived
     stage ceiling; frozen digest-bound contract + audit event.
     This endpoint executes NOTHING and issues NO credentials.

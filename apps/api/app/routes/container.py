@@ -74,9 +74,14 @@ async def create_container_scan(
     await db.commit()
     await db.refresh(scan)
 
-    # Enqueue job
-    from app.worker import enqueue_container_scan
-    enqueue_container_scan(str(scan.id))
+    # V4.2 Phase 39/40: enqueue failure must never strand a QUEUED row.
+    from app.services.enqueue_service import enqueue_scan_or_fail, EnqueueUnavailableError
+    from app.worker import enqueue_container_scan as _enqueue
+
+    try:
+        await enqueue_scan_or_fail(db, scan_id=str(scan.id), enqueue=lambda: _enqueue(str(scan.id)))
+    except EnqueueUnavailableError:
+        raise HTTPException(status_code=503, detail="Analysis queue is unavailable. Please retry.")
 
     return ScanResponse.model_validate(scan)
 
@@ -119,8 +124,13 @@ async def create_log_analysis(
     await db.commit()
     await db.refresh(scan)
 
-    # Enqueue job
-    from app.worker import enqueue_log_analysis
-    enqueue_log_analysis(str(scan.id))
+    # V4.2 Phase 39/40: enqueue failure must never strand a QUEUED row.
+    from app.services.enqueue_service import enqueue_scan_or_fail, EnqueueUnavailableError
+    from app.worker import enqueue_log_analysis as _enqueue
+
+    try:
+        await enqueue_scan_or_fail(db, scan_id=str(scan.id), enqueue=lambda: _enqueue(str(scan.id)))
+    except EnqueueUnavailableError:
+        raise HTTPException(status_code=503, detail="Analysis queue is unavailable. Please retry.")
 
     return ScanResponse.model_validate(scan)

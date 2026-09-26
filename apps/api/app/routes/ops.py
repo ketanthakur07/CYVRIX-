@@ -441,6 +441,66 @@ async def run_reconciliation_route(
     )
 
 
+# ── V4.2 Phase 27: worker drain (deployment control) ─────────────────
+
+
+@router.post("/workers/{worker_id}/drain")
+async def drain_worker(
+    request: Request,
+    worker_id: str,
+    user: User = Depends(require_capability(om.CAP_PAUSE_SYSTEM)),
+):
+    """Request a graceful worker drain.
+
+    A draining worker stops claiming new jobs, finishes its current job
+    (RQ warm shutdown), and exits cleanly — used during rolling deploys.
+    The marker lives in Redis so ANY api instance can drain ANY worker.
+    Deployment control never touches authorization state: it cannot
+    create, approve, authorize, or execute anything (Phase 42: this is
+    INFRASTRUCTURE lifecycle, not remediation rollback).
+
+    worker_id must match the worker's own identity (hostname-derived);
+    unknown ids are accepted but harmless — the marker simply expires.
+    """
+    await _rate_limited(request, user, "worker-drain", settings.ops_rate_limit_per_hour)
+    if not worker_id or len(worker_id) > 128 or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for c in worker_id):
+        raise HTTPException(status_code=422, detail="WORKER_ID_INVALID")
+    from app.session import get_redis
+    from app.worker_runtime import request_drain
+
+    r = await get_redis()
+    ok = await request_drain(r, worker_id=worker_id)
+    if not ok:
+        raise HTTPException(status_code=503, detail="DRAIN_REQUEST_UNAVAILABLE")
+    return {"worker_id": worker_id, "drain_requested": True}
+
+
+@router.get("/workers")
+async def list_workers(
+    request: Request,
+    user: User = Depends(require_capability(om.CAP_VIEW_OPERATIONS)),
+):
+    """Live worker fleet view (heartbeat-derived; expired workers vanish)."""
+    await _rate_limited(request, user, "workers-read", settings.ops_rate_limit_per_hour)
+    from app.session import get_redis
+    from app.worker_runtime import fleet_snapshot
+
+    r = await get_redis()
+    fleet = await fleet_snapshot(r)
+    workers = []
+    for worker_id, info in (fleet.get("workers") or {}).items():
+        workers.append(
+            {
+                "worker_id": worker_id,
+                "state": info.get("state"),
+                "queues": info.get("queues"),
+                "current_job": info.get("current_job") or None,
+                "last_heartbeat": info.get("last_heartbeat"),
+            }
+        )
+    return {"workers": workers}
+
+
 @router.get("/reconciliation/last", response_model=Optional[ReconciliationOut])
 async def last_reconciliation(
     request: Request,
@@ -478,7 +538,36 @@ async def get_metrics(
     repository names, branches, or user content can appear.
     """
     await _rate_limited(request, user, "metrics", settings.ops_rate_limit_per_hour)
-    from app.metrics import render_prometheus
+    from app.metrics import render_prometheus, set_gauge
+
+    # V4.2 Phase 20/21: live platform gauges — worker fleet liveness and
+    # queue depths are read from Redis at scrape time. Content-free by
+    # construction: COUNTS only (no per-worker labels — that would mint
+    # an unbounded series per worker lifecycle). If Redis is unavailable
+    # the gauges keep their last known values; the scrape never fails on
+    # a dependency blip.
+    try:
+        from app.session import get_redis
+        from app.worker_runtime import fleet_snapshot
+
+        r = await get_redis()
+        fleet = await fleet_snapshot(r)
+        live = 0
+        draining = 0
+        for info in (fleet.get("workers") or {}).values():
+            state = (info.get("state") or "").upper()
+            if state == "DRAINING":
+                draining += 1
+            elif state in ("RUNNING", "BUSY"):
+                live += 1
+        set_gauge("cyvrix_workers_live", live)
+        set_gauge("cyvrix_workers_draining", draining)
+        set_gauge("cyvrix_queue_depth_scans", max(0, int(await r.llen("rq:queue:scans"))))
+        set_gauge("cyvrix_queue_depth_container_scans", max(0, int(await r.llen("rq:queue:container_scans"))))
+        set_gauge("cyvrix_queue_depth_log_analysis", max(0, int(await r.llen("rq:queue:log_analysis"))))
+    except Exception:
+        # Redis blipped: gauges hold last values, scrape still serves.
+        pass
 
     from fastapi.responses import PlainTextResponse
 

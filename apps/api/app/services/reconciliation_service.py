@@ -69,6 +69,9 @@ async def run_reconciliation(
         findings.extend(await _reconcile_push_windows(db, rec, findings, stats, now))
         findings.extend(await _reconcile_stuck_executions(db, rec, stats, now))
         findings.extend(await _expire_stale_leases(db, rec, stats, now))
+        # V4.2 Phase 39/40: stranded QUEUED scans (enqueue outage, queue
+        # data loss) get an honest terminal state — never UNKNOWN forever.
+        findings.extend(await _reconcile_stale_queued_scans(db, rec, stats, now))
         stats["orphans_removed"] = await _cleanup_orphan_workspaces(db, rec, findings, now)
         rec.status = "COMPLETED"
     except Exception as exc:  # never crash the caller; report failure
@@ -247,6 +250,22 @@ async def _expire_stale_leases(db, rec, stats, now) -> list[dict]:
                 "reason": f"owner={lease.lease_owner_id}",
             })
     return out
+
+
+# ── Stale QUEUED scans (V4.2 Phase 39/40) ────────────────────────────
+
+
+async def _reconcile_stale_queued_scans(db, rec, stats, now) -> list[dict]:
+    """Delegate to the enqueue service: QUEUED scans past the staleness
+    bound are moved to FAILED(ENQUEUE_FAILED) — auditable via the caller,
+    reported here. Bounded per pass; a large backlog converges over
+    successive reconciliation runs."""
+    from app.services.enqueue_service import reconcile_stale_queued_scans
+
+    findings = await reconcile_stale_queued_scans(db, now=now)
+    stats["inspected"] += len(findings)
+    stats["reconciled"] += len(findings)
+    return findings
 
 
 # ── Orphan workspace cleanup (Phase 34) ──────────────────────────────

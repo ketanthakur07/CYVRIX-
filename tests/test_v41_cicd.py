@@ -23,7 +23,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "apps", "api"))
 
-from sqlalchemy import select
+from sqlalchemy import select, delete as sa_delete
 
 from app.models import (
     Finding,
@@ -523,10 +523,29 @@ class _RescanSessionStub:
     def close(self):
         pass
 
-    def execute(self, stmt):
+    def execute(self, stmt, **kwargs):
         return _run(self._execute(stmt))
 
     async def _execute(self, stmt):
+        # V4.2: the pipeline may issue a bulk DELETE (redelivery
+        # convergence for scan-scoped dependency rows). Honor it against
+        # the real database, then drop the stale copies from the stub's
+        # detached-object cache so subsequent selects see the truth.
+        if getattr(stmt, "is_delete", False):
+            table = stmt.table
+            criteria = stmt._where_criteria or ()
+            wc = criteria[0] if criteria else None
+            async with self._factory() as s:
+                delete_stmt = sa_delete(table)
+                if wc is not None:
+                    delete_stmt = delete_stmt.where(wc)
+                await s.execute(delete_stmt)
+                await s.commit()
+            self._objects = {
+                k: v for k, v in self._objects.items()
+                if getattr(k[0], "__tablename__", None) != table.name
+            }
+            return _ExecResult([])
         entity = stmt.column_descriptions[0]["entity"]
         wc = stmt.whereclause
         clauses = list(wc.clauses) if hasattr(wc, "clauses") else ([] if wc is None else [wc])

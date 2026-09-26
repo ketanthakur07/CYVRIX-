@@ -94,7 +94,7 @@ async def admit_and_execute(
 ):
     """Admit one authorized execution and run it through the sandbox.
 
-    INTERNAL ONLY. Exactly-once: a replayed authorization is refused
+    INTERNAL ONLY. At-most-once logical effect (V4.2 Phase 6): a replayed authorization is refused
     with EXECUTION_REPLAY; a concurrent one with EXECUTION_IN_PROGRESS.
     Returns bounded run metadata only.
     """

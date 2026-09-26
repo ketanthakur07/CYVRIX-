@@ -1,0 +1,54 @@
+# CYVRIX V4.2 — local test infrastructure containers.
+#
+# Why a separate compose file:
+#   The pytest suite and every race test in tests/ expect PostgreSQL on
+#   localhost:5432 and Redis on localhost:6379 (see the documented
+#   commands in tests/test_approval_races.py), but a developer machine
+#   may already occupy those ports. This file gives V4.2 certification
+#   work (unit, race, multi-instance, chaos, load) DEDICATED, disposable
+#   containers, isolated from any e2e stack.
+#
+#   ALWAYS run with an explicit project name so this file can never
+#   attach to, recreate, or remove another compose project's containers:
+#
+#     docker compose -p cyvrixv42 -f infra/docker-compose.v42.yml up -d
+#     docker compose -p cyvrixv42 -f infra/docker-compose.v42.yml down -v
+#
+#   Default ports are chosen to avoid the common dev-machine collisions
+#   (5432 native postgres, 5433/6380 e2e stack). Override with
+#   CYVRIX_V42_PG_PORT / CYVRIX_V42_REDIS_PORT and point the test
+#   DATABASE_URL/REDIS_URL at the chosen ports.
+#
+#   No credentials here are secrets: they are test-only, they never leave
+#   localhost, and the platform refuses development credentials in
+#   production (worker + app config validators).
+name: cyvrixv42
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: cyvrix-v42-postgres
+    environment:
+      POSTGRES_USER: cyvrix
+      POSTGRES_PASSWORD: cyvrix_dev
+      POSTGRES_DB: cyvrix
+    ports:
+      - "${CYVRIX_V42_PG_PORT:-5434}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cyvrix"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    # No volume: fully disposable; the e2e stack keeps its own volume in
+    # infra/docker-compose.e2e.yml.
+
+  redis:
+    image: redis:7-alpine
+    container_name: cyvrix-v42-redis
+    ports:
+      - "${CYVRIX_V42_REDIS_PORT:-6381}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

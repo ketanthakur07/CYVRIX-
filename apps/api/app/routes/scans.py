@@ -73,9 +73,16 @@ async def create_scan(
     await db.commit()
     await db.refresh(scan)
 
-    # Enqueue job to Redis (HTTP request returns immediately)
-    from app.worker import enqueue_scan
-    enqueue_scan(str(scan.id))
+    # V4.2 Phase 39/40: enqueue failure must never strand a QUEUED row.
+    # The scan is moved to an honest terminal state (FAILED/ENQUEUE_FAILED)
+    # and the caller gets 503 — a SAFE FAILURE, not an UNKNOWN.
+    from app.services.enqueue_service import enqueue_scan_or_fail, EnqueueUnavailableError
+    from app.worker import enqueue_scan as _enqueue
+
+    try:
+        await enqueue_scan_or_fail(db, scan_id=str(scan.id), enqueue=lambda: _enqueue(str(scan.id)))
+    except EnqueueUnavailableError:
+        raise HTTPException(status_code=503, detail="Analysis queue is unavailable. Please retry.")
 
     return ScanResponse.model_validate(scan)
 

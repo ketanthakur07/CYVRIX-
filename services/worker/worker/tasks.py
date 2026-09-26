@@ -282,6 +282,20 @@ def run_scan(scan_id: str):
             logger.error("scan_not_found scan_id=%s", scan_id)
             return {"error": "Scan not found"}
 
+        # ── V4.2 at-least-once claim guard ──────────────────────────
+        # Queue delivery is AT-LEAST-ONCE: a redelivered job after a
+        # worker crash, a reconciliation race, or a late enqueue retry
+        # must never re-run a scan that already reached a terminal
+        # state. Non-terminal statuses (CLONING/SCANNING) are the SAME
+        # logical job being retried after a crash — they proceed, and
+        # artifact persistence below is idempotent so re-runs converge.
+        if scan.status in ("COMPLETED", "FAILED"):
+            logger.warning(
+                "scan_claim_ignored_terminal scan_id=%s status=%s",
+                scan_id, scan.status,
+            )
+            return {"ok": True, "skipped": "SCAN_TERMINAL"}
+
         repo = db.get(Repository, scan.repository_id)
         if not repo:
             _fail_scan(db, scan, "REPOSITORY_NOT_FOUND")
@@ -352,7 +366,15 @@ def run_scan(scan_id: str):
                 str(scan.id),
             ))
 
-            # Persist dependencies
+            # Persist dependencies. V4.2: a redelivered job re-running
+            # the same logical scan must CONVERGE, not duplicate — prior
+            # scan-scoped dependency rows are replaced first (findings
+            # are repo-scoped and dedup by fingerprint downstream).
+            from sqlalchemy import delete as _sa_delete
+            db.execute(
+                _sa_delete(Dependency).where(Dependency.scan_id == scan.id),
+                synchronize_session=False,
+            )
             for dep in scan_result["dependencies"]:
                 db_dep = Dependency(
                     scan_id=scan.id,
@@ -633,7 +655,13 @@ async def _run_investigation_with_context(
 
 
 def _compute_risk(db: Session, finding, investigation_result):
-    """Compute and persist risk assessment for a finding."""
+    """Compute and persist risk assessment for a finding.
+
+    NOTE: risk assessments are HISTORICAL by design — one row per scan
+    run, never updated in place (the rescan-durability contract depends
+    on it). Redelivery convergence applies to findings (fingerprint
+    dedup), investigations (1:1 reuse), recommendations (1:1 update)
+    and scan-scoped dependencies (delete+reinsert) — not here."""
     exposure = None
     exploitability = None
     confidence = None
@@ -650,14 +678,13 @@ def _compute_risk(db: Session, finding, investigation_result):
         confidence,
     )
 
-    assessment = RiskAssessment(
+    db.add(RiskAssessment(
         finding_id=finding.id,
         risk_score=score,
         risk_level=level,
         risk_version=RISK_ALGO_VERSION,
         factors=factors.model_dump(),
-    )
-    db.add(assessment)
+    ))
 
 
 def _generate_recommendation(db: Session, finding):
@@ -678,21 +705,28 @@ def _generate_recommendation(db: Session, finding):
         rec = generate_deterministic_recommendation(finding_dict)
         if rec:
             from app.models import Recommendation
-            recommendation = Recommendation(
-                finding_id=finding.id,
-                status="COMPLETED",
-                trust_level=rec["trust_level"],
-                title=rec["title"],
-                what=rec.get("what"),
-                why=rec.get("why"),
-                change=rec.get("change"),
-                uncertainty=rec.get("uncertainty"),
-                risk=rec.get("risk"),
-                validation=rec.get("validation"),
-                evidence=rec.get("evidence"),
-                created_at=datetime.now(timezone.utc),
-            )
-            db.add(recommendation)
+
+            # V4.2: idempotent update-in-place (one recommendation per
+            # finding, even across redelivered scan jobs). The row is
+            # never deleted — ActionProposals may reference it.
+            from sqlalchemy import select as _select
+            recommendation = db.execute(
+                _select(Recommendation).where(Recommendation.finding_id == finding.id)
+            ).scalar_one_or_none()
+            if recommendation is None:
+                recommendation = Recommendation(finding_id=finding.id)
+                db.add(recommendation)
+            recommendation.status = "COMPLETED"
+            recommendation.trust_level = rec["trust_level"]
+            recommendation.title = rec["title"]
+            recommendation.what = rec.get("what")
+            recommendation.why = rec.get("why")
+            recommendation.change = rec.get("change")
+            recommendation.uncertainty = rec.get("uncertainty")
+            recommendation.risk = rec.get("risk")
+            recommendation.validation = rec.get("validation")
+            recommendation.evidence = rec.get("evidence")
+            recommendation.created_at = datetime.now(timezone.utc)
     except Exception as e:
         logger.warning("recommendation_generation_failed finding_id=%s error=%s", finding.id, str(e)[:100])
 
@@ -708,7 +742,19 @@ def _update_status(db: Session, scan: Scan, status: str):
 
 
 def _fail_scan(db: Session, scan: Scan, reason: str):
-    """Mark scan as failed with sanitized error reason."""
+    """Mark scan as failed with sanitized error reason.
+
+    V4.2: never corrupt an honest terminal state — a scan that already
+    COMPLETED is never flipped to FAILED by a late failure path, and an
+    already-FAILED scan keeps its first failure reason (first cause is
+    the diagnosable one)."""
+    if scan.status == "COMPLETED":
+        logger.warning(
+            "fail_scan_refused_terminal scan_id=%s reason=%s",
+            str(scan.id), str(reason)[:80],
+        )
+        db.rollback()
+        return
     scan.status = "FAILED"
     scan.error_reason = reason[:500]
     scan.completed_at = datetime.now(timezone.utc)

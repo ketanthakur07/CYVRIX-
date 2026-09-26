@@ -644,7 +644,8 @@ async def start_verification(
         raise VerificationDenied(vm.RC_VERIFICATION_NOT_POSSIBLE,
                                  "remediation has no committed SHA")
 
-    # 2. Exactly-once per remediation (verdict is final; re-verification
+    # 2. At-most-once logical effect per remediation (V4.2 Phase 6;
+    #    verdict is final; re-verification
     #    is a NEW remediation decision, never a state rewrite)
     existing = (
         await db.execute(

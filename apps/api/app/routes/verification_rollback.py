@@ -107,7 +107,7 @@ async def start_verification(
 
     Server-side guarantees: ownership chain; kill switch; committed SHA
     present; plan frozen from trusted rows with a persisted digest;
-    exactly-once per remediation (verdict is final — re-verification is
+    at-most-once per remediation (UNIQUE guard; verdict is final — re-verification is
     refused at the DB level). Executes NOTHING.
     """
     remediation = await _owned_remediation(db, remediation_id, user.id)

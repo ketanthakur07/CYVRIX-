@@ -448,8 +448,9 @@ class ExecutionRun(Base):
     - Admission is atomic: a partial UNIQUE live index
       (ADMISSION_PENDING/EXECUTING per authorization) + in-lock re-checks
       guarantee two executors can never both reserve one authorization
-    - Exactly-once: a UNIQUE completed index makes replayed admissions
-      fail at the database level
+    - At-most-once logical effect (V4.2 Phase 6: at-least-once delivery
+      + idempotent processing): a UNIQUE completed index makes replayed
+      admissions fail at the database level
     - run_state follows ExecutionRunState transitions; FAILED and
       CLEANUP_FAILED are terminal; there is no VERIFIED state (V3.6)
     - cleanup_status records teardown independently of run success so a
@@ -562,8 +563,9 @@ class GitRemediation(Base):
     - Created ONLY from server-side verified run state (RESULT_READY or
       COMPLETED with host-side scope verification) — never from client
       claims; the client supplies nothing security-relevant
-    - Exactly-once: UNIQUE execution_run_id; a replayed remediation is
-      refused at the database level
+    - At-most-once logical effect (V4.2 Phase 6: at-least-once delivery
+      + idempotent processing): UNIQUE execution_run_id means a replayed
+      remediation is refused at the database level
     - One live pipeline per authorization (partial unique index); one
       deterministic remediation branch per repository among live rows
     - The full Git/GitHub contract (repo identity, base SHA, branches,
@@ -624,7 +626,7 @@ class GitRemediation(Base):
     finished_at = Column(DateTime(timezone=True))
 
     __table_args__ = (
-        # Exactly-once per execution run
+        # At-most-once logical effect per execution run
         Index("uq_git_remediations_run", "execution_run_id", unique=True),
         # At most one live pipeline per authorization
         Index(
@@ -667,9 +669,11 @@ class VerificationRun(Base):
     - Created ONLY from server-side remediation state (PR_CREATED/
       PUSHED/COMMITTED with committed_sha present) — never client claims;
       the request body carries NOTHING security-relevant
-    - Exactly-once per remediation: UNIQUE git_remediation_id (a
-      verification verdict is final; re-verification is a new decision
-      made through a new remediation, never a state rewrite)
+    - At-most-once logical effect per remediation (V4.2 Phase 6:
+      at-least-once delivery + idempotent processing): UNIQUE
+      git_remediation_id; a verification verdict is final;
+      re-verification is a new decision made through a new remediation,
+      never a state rewrite
     - The frozen VerificationPlan + its canonical digest are persisted;
       a later plan-digest mismatch is a tamper event, never repaired
     - result ∈ PASS/FAIL/INCONCLUSIVE/SKIPPED/BLOCKED (Phase 3); COMPLETED
@@ -709,7 +713,7 @@ class VerificationRun(Base):
     created_at = Column(DateTime(timezone=True), default=utcnow)
 
     __table_args__ = (
-        # Exactly-once per remediation
+        # At-most-once logical effect per remediation (UNIQUE guard)
         Index("uq_verification_runs_remediation", "git_remediation_id", unique=True),
         Index("ix_verification_runs_state", "verification_state"),
         Index("ix_verification_runs_repo", "repository_id"),
@@ -754,8 +758,10 @@ class RollbackRun(Base):
     - The rollback TARGET is server-derived: the frozen contract's
       base_commit_sha. The client can never name a SHA (no arbitrary-SHA
       rollback endpoint exists by design)
-    - Exactly-once per remediation: UNIQUE git_remediation_id (the
-      idempotency key IS the remediation identity)
+    - At-most-once logical effect per remediation (V4.2 Phase 6:
+      at-least-once delivery + idempotent processing; UNIQUE
+      git_remediation_id — the idempotency key IS the remediation
+      identity)
     - Pre-flight state verification: the remote remediation branch tip
       must still equal the remediation's pushed_sha; a moved/stale branch
       → CONFLICT (fail closed, no blind rollback)
@@ -794,7 +800,10 @@ class RollbackRun(Base):
     finished_at = Column(DateTime(timezone=True))
 
     __table_args__ = (
-        # Exactly-once per remediation (idempotency key)
+        # V4.2 terminology (Phase 6): delivery is at-least-once; the
+        # application-layer idempotency (unique index on the remediation
+        # identity + terminal-state guards) yields at-most-once logical
+        # EFFECT. "Exactly-once" below means exactly that combination.
         Index("uq_rollback_runs_remediation", "git_remediation_id", unique=True),
         # Branch-name collision guard among live rows
         Index(

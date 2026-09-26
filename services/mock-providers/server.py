@@ -8,6 +8,7 @@ Mocks only external provider boundaries:
 
 All other CYVRIX services remain REAL.
 """
+import asyncio
 import base64
 import gzip
 import json
@@ -16,12 +17,14 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
+from starlette.requests import ClientDisconnect
 
 app = FastAPI(title="CYVRIX Mock Providers")
 
@@ -32,6 +35,101 @@ FIXTURE_DIR = os.environ.get("FIXTURE_DIR", "/fixtures")
 
 # Track which repos have been "cloned" (initialized as bare repos)
 _initialized_repos = set()
+
+
+# ── V4.2 Phase 18/49: controlled GitHub failure injection ─────────
+# Test-only control plane: an operator (or the chaos harness) arms a
+# failure mode; the NEXT N matching calls fail with the configured
+# response, then behavior returns to normal. State is process-local to
+# the mock server by design — it simulates an EXTERNAL provider, and
+# nothing in CYVRIX ever trusts it.
+
+_fault_lock = threading.Lock()
+_fault_state: dict[str, dict] = {}
+
+
+class FaultSpec:
+    """Bounded, explicit failure modes. Unknown modes are refused."""
+
+    MODES = {"500", "429", "timeout", "reset", "partial"}
+
+    def __init__(self, mode: str, times: int):
+        if mode not in self.MODES:
+            raise ValueError(f"unknown fault mode: {mode}")
+        if not isinstance(times, int) or times < 1 or times > 100:
+            raise ValueError("times must be 1..100")
+        self.mode = mode
+        self.times = times
+
+
+async def _maybe_inject_fault(kind: str) -> Response | None:
+    """Return an injected failure response for this call, or None.
+
+    kind: which provider surface (api | git | webhook) — arms are
+    independent so a harness can fail only pushes, for example.
+    """
+    with _fault_lock:
+        arm = _fault_state.get(kind)
+        if not arm or arm["remaining"] <= 0:
+            return None
+        arm["remaining"] -= 1
+        mode = arm["mode"]
+
+    if mode == "500":
+        return JSONResponse(status_code=500, content={"message": "injected fault: 500"})
+    if mode == "429":
+        return JSONResponse(
+            status_code=429,
+            headers={"Retry-After": "1"},
+            content={"message": "injected fault: 429 rate limited"},
+        )
+    if mode == "timeout":
+        # Longer than the platform's outbound timeout budget; the client
+        # gives up first — a real timeout, not a fake one.
+        await asyncio.sleep(35)
+        return JSONResponse(status_code=504, content={"message": "injected fault: timeout"})
+    if mode == "reset":
+        # Aborts the connection mid-response: the client sees an
+        # incomplete read, not a clean HTTP error.
+        raise ClientDisconnect()
+    if mode == "partial":
+        # A 200 whose body lies (missing fields): exercises response
+        # validation, not just transport failure.
+        return JSONResponse(status_code=200, content={"unexpected": "shape"})
+    return None
+
+
+@app.post("/_test/faults/{kind}")
+async def arm_fault(kind: str, request: Request):
+    """Arm an injected failure (test-only control surface).
+
+    Body: {"mode": "500|429|timeout|reset|partial", "times": N}
+    kind: api | git | webhook
+    Pass times=0 in the mode reset form {"mode": "clear"} to disarm.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=422, content={"message": "body must be JSON"})
+    if kind not in ("api", "git", "webhook"):
+        return JSONResponse(status_code=404, content={"message": "unknown fault kind"})
+    if body.get("mode") == "clear":
+        with _fault_lock:
+            _fault_state.pop(kind, None)
+        return {"kind": kind, "armed": False}
+    try:
+        spec = FaultSpec(body.get("mode", ""), int(body.get("times", 1)))
+    except (ValueError, TypeError) as exc:
+        return JSONResponse(status_code=422, content={"message": str(exc)})
+    with _fault_lock:
+        _fault_state[kind] = {"mode": spec.mode, "remaining": spec.times}
+    return {"kind": kind, "armed": True, "mode": spec.mode, "times": spec.times}
+
+
+@app.get("/_test/faults")
+async def fault_status():
+    with _fault_lock:
+        return {k: dict(v) for k, v in _fault_state.items()}
 
 
 def _ensure_repo_initialized(repo_name: str) -> str:
@@ -100,6 +198,9 @@ def _ensure_repo_initialized(repo_name: str) -> str:
 @app.post("/app/installations/{installation_id}/access_tokens")
 async def github_create_token(installation_id: int):
     """Mock GitHub App installation token creation."""
+    injected = await _maybe_inject_fault("api")
+    if injected is not None:
+        return injected
     token = f"mock_token_{installation_id}_{uuid4().hex[:16]}"
     return {
         "token": token,
@@ -338,6 +439,9 @@ async def git_info_refs(owner: str, repo: str, request: Request):
     upload-pack for a receive-pack request makes pushes impossible (git
     aborts with 'smart HTTP transport does not support...' style errors).
     """
+    injected = await _maybe_inject_fault("git")
+    if injected is not None:
+        return injected
     bare_path = _ensure_repo_initialized(repo)
     service = request.query_params.get("service", "git-upload-pack")
 
@@ -386,6 +490,9 @@ async def git_upload_pack(owner: str, repo: str, request: Request):
 
 @app.post("/{owner}/{repo}.git/git-receive-pack")
 async def git_receive_pack(owner: str, repo: str, request: Request):
+    injected = await _maybe_inject_fault("git")
+    if injected is not None:
+        return injected
     """Git smart HTTP: receive-pack (push) — V3.5 e2e support.
 
     Accepts pushes like a real remote: ref updates land in the bare repo.
@@ -448,6 +555,9 @@ _pr_counter = {"n": 0}
 
 @app.post("/repos/{owner}/{repo}/pulls")
 async def github_create_pull(owner: str, repo: str, request: Request):
+    injected = await _maybe_inject_fault("api")
+    if injected is not None:
+        return injected
     """Create a mock pull request (V3.5 e2e support).
 
     Validates head/base like GitHub: the head branch must exist; base

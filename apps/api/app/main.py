@@ -30,6 +30,11 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # V4.2 Phase 20: structured logging is opt-in via CYVRIX_LOG_FORMAT=json;
+    # the default output is unchanged.
+    from app.observability import configure_logging
+    configure_logging()
+
     # Startup: verify database is reachable (schema managed by Alembic)
     try:
         await init_db()
@@ -55,9 +60,16 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown: close Redis
+    # V4.2 Phase 26 — graceful shutdown order: stop serving (caller),
+    # close Redis, release pooled DB connections. A rolling deploy must
+    # not leave dead sockets against PostgreSQL.
     try:
         await close_redis()
+    except Exception:
+        pass
+    try:
+        from app.database import prepare_for_pool_drain
+        await prepare_for_pool_drain()
     except Exception:
         pass
 
@@ -85,6 +97,8 @@ async def request_id_middleware(request, call_next):
     safe_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
     request_id = supplied if supplied and set(supplied) <= safe_chars else _uuid.uuid4().hex[:16]
     request.state.request_id = request_id
+    from app.observability import set_request_id as _set_request_id
+    _set_request_id(request_id)
     response = await call_next(request)
     response.headers["x-request-id"] = request_id
     return response
@@ -129,7 +143,8 @@ app.include_router(execution_authorization.router)
 app.include_router(execution_runs.router)
 
 # Include V3.5 router (controlled Git/GitHub remediation — branch/commit/
-# push/PR after server-verified runs; exactly-once per run; service-identity
+# push/PR after server-verified runs; at-most-once per run (UNIQUE guard,
+# V4.2 Phase 6); service-identity
 # pipeline execution; short-lived repo-scoped credentials; NO force push,
 # NO default-branch push)
 app.include_router(git_remediation.router)

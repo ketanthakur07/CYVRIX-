@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -232,7 +233,18 @@ async def github_webhook(
                     # intercept the enqueue consistently with api_v1.
                     from app.worker import enqueue_scan
 
-                    enqueue_scan(str(scan.id))
+                    # V4.2 Phase 39/40: enqueue failure must never strand a
+                    # QUEUED row — the scan moves to an honest terminal
+                    # state before the 503 is returned. GitHub redelivers;
+                    # the redelivery sees the terminal scan and the
+                    # dedup/replay protection, so at-most-one logical
+                    # analysis request per real push is preserved.
+                    from app.services.enqueue_service import enqueue_scan_or_fail
+
+                    await enqueue_scan_or_fail(
+                        db, scan_id=str(scan.id),
+                        enqueue=lambda: enqueue_scan(str(scan.id)),
+                    )
                 except Exception:  # noqa: BLE001 — surface, never swallow
                     logger.error(
                         "webhook_enqueue_failed scan=%s", str(scan.id)[:8]
@@ -241,15 +253,21 @@ async def github_webhook(
 
         except wh.WebhookError as exc:
             is_replay = exc.reason_code == wh.R_DUPLICATE_DELIVERY
-            await _record_delivery(
-                db,
-                organization_id=organization_id,
-                delivery_id=delivery_id,
-                event_type=event_type,
-                signature_state=signature_state,
-                outcome="REJECTED",
-                reason_code=exc.reason_code,
-            )
+            # V4.2 (multi-instance certification): a REPLAY of a delivery
+            # that already has a row must NOT insert a second one —
+            # UNIQUE(org, delivery_id) would abort the commit (500). The
+            # first delivery's record is the durable truth; a replay only
+            # refuses. NEW deliveries still get their REJECTED record.
+            if not is_replay:
+                await _record_delivery(
+                    db,
+                    organization_id=organization_id,
+                    delivery_id=delivery_id,
+                    event_type=event_type,
+                    signature_state=signature_state,
+                    outcome="REJECTED",
+                    reason_code=exc.reason_code,
+                )
             await db.commit()
             metric("webhooks_rejected_total", {"reason": exc.reason_code})
             if is_replay:
@@ -267,27 +285,34 @@ async def github_webhook(
             return Response(status_code=exc.http_status)
 
         # ── Accepted ─────────────────────────────────────────────────
-        await _record_delivery(
-            db,
-            organization_id=organization_id,
-            delivery_id=delivery_id,
-            event_type=event_type,
-            signature_state=signature_state,
-            outcome="ACCEPTED",
-            reason_code=None,
-            installation_pk=installation_row.id,
-            repository_pk=repository.id,
-            commit_sha=push.head_sha,
-            ref=push.ref,
-            scan_id=scan.id,
-        )
+        # V4.2 (multi-instance certification): a REPLAYED delivery must
+        # NOT insert a second delivery row — UNIQUE(org, delivery_id)
+        # exists precisely to make replay safe, and the first delivery's
+        # ACCEPTED row is already on disk. The replay is answered from
+        # the idempotency reservation with the original effect reference
+        # (no new side effect, no 500, at-most-one analysis request).
+        if result.created:
+            await _record_delivery(
+                db,
+                organization_id=organization_id,
+                delivery_id=delivery_id,
+                event_type=event_type,
+                signature_state=signature_state,
+                outcome="ACCEPTED",
+                reason_code=None,
+                installation_pk=installation_row.id,
+                repository_pk=repository.id,
+                commit_sha=push.head_sha,
+                ref=push.ref,
+                scan_id=scan.id,
+            )
         await wh.audit_webhook_event(
             db,
             organization_id=organization_id,
             repository_id=repository.id,
             event_type=event_type,
             outcome="ACCEPTED",
-            reason_code=None,
+            reason_code=None if result.created else "REPLAYED",
             delivery_id=delivery_id,
             signature_state=signature_state,
         )
@@ -295,6 +320,11 @@ async def github_webhook(
         metric("webhooks_received_total", {"event": event_type})
         if result.created:
             metric("jobs_created_total", {"trigger": "webhook"})
+        if not result.created:
+            return JSONResponse(
+                status_code=200,
+                content={"replayed": True, "scan_id": str(scan.id)},
+            )
         return Response(status_code=202)
 
     except Exception:  # noqa: BLE001 — intake never leaks internals

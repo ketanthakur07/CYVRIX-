@@ -79,6 +79,20 @@ _METRICS: dict[str, _MetricDef] = {
                    "Analysis jobs waiting in the queue.", ()),
         _MetricDef("active_jobs", "gauge",
                    "Analysis jobs currently executing.", ()),
+        # V4.2 Phase 20/21 — live platform gauges. Worker fleet counts are
+        # scalars by design: per-worker labels would mint an unbounded
+        # time series per worker lifecycle (cardinality), so liveness is
+        # expressed as counts, not per-worker series.
+        _MetricDef("cyvrix_workers_live", "gauge",
+                   "Workers reporting RUNNING/BUSY within the heartbeat TTL.", ()),
+        _MetricDef("cyvrix_workers_draining", "gauge",
+                   "Workers currently draining (deployment rollout).", ()),
+        _MetricDef("cyvrix_queue_depth_scans", "gauge",
+                   "Jobs waiting in the scans queue.", ()),
+        _MetricDef("cyvrix_queue_depth_container_scans", "gauge",
+                   "Jobs waiting in the container_scans queue.", ()),
+        _MetricDef("cyvrix_queue_depth_log_analysis", "gauge",
+                   "Jobs waiting in the log_analysis queue.", ()),
     )
 }
 

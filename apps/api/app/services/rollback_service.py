@@ -192,7 +192,9 @@ async def start_rollback(
     if proposal.action_digest != remediation.action_digest:
         raise RollbackDenied(vm.RC_ACTION_DIGEST_MISMATCH)
 
-    # 3. Exactly-once per remediation (idempotency key = remediation id)
+    # 3. At-most-once logical effect per remediation (V4.2 Phase 6:
+    # at-least-once delivery + idempotency key = remediation id; no
+    # impossible exactly-once delivery is claimed).
     existing = (
         await db.execute(
             select(RollbackRun).where(

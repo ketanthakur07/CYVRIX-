@@ -47,6 +47,7 @@ apps/web/build_out.txt
 apps/web/e2e_pw*.txt
 tests/*.txt
 .freebuff/
+backups/
 
 # Test artifacts
 htmlcov/
