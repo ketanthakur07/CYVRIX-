@@ -20,6 +20,7 @@ from sqlalchemy import select, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from worker.config import get_settings
+from worker.outbound_events import notify_commit_mismatch, notify_scan_outcome
 
 settings = get_settings()
 
@@ -351,6 +352,15 @@ def run_scan(scan_id: str):
                     "commit_binding_mismatch scan_id=%s requested=%s cloned=%s",
                     scan_id, requested[:8], str(commit_sha)[:8],
                 )
+                # V4.2 completion: subscribed receivers learn the scan
+                # failed COMMIT_MISMATCH; CI-triggered scans leave a
+                # SECURITY-CRITICAL CI_EVENT_COMMIT_MISMATCH witness.
+                try:
+                    repo_ref = db.get(Repository, scan.repository_id)
+                    if repo_ref is not None:
+                        notify_commit_mismatch(db, repo_ref, scan)
+                except Exception:
+                    pass
                 return {"error": "COMMIT_MISMATCH"}
             db.commit()
 
@@ -418,6 +428,11 @@ def run_scan(scan_id: str):
                 if finding:
                     _generate_recommendation(db, finding)
             db.commit()
+
+            # V4.2 completion: fan the REAL terminal state out to
+            # subscribed webhook receivers (SCAN_COMPLETED + any findings
+            # created by this run). Best-effort, never fatal.
+            notify_scan_outcome(db, repo, scan, [])
 
             db.add(AuditEvent(
                 repository_id=repo.id,
@@ -759,3 +774,11 @@ def _fail_scan(db: Session, scan: Scan, reason: str):
     scan.error_reason = reason[:500]
     scan.completed_at = datetime.now(timezone.utc)
     db.commit()
+    # V4.2 completion: a FAILED scan is a real event — subscribed
+    # receivers are told the server-computed outcome (FAIL).
+    try:
+        repo_ref = db.get(Repository, scan.repository_id)
+        if repo_ref is not None:
+            notify_scan_outcome(db, repo_ref, scan, [])
+    except Exception:
+        pass

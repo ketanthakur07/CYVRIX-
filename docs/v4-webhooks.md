@@ -182,3 +182,88 @@ names, no commit messages, no payload content.
 Tests: `tests/test_v41_webhooks.py` (25), failure paths in
 `tests/test_v41_failures.py` (6), races in
 `tests/test_v41_boundary_races.py` (real PostgreSQL).
+
+---
+
+# CYVRIX V4.2 — Outbound Webhooks (shipped)
+
+This section is the **normative** description of the outbound delivery
+system implemented in `services/outbound_webhook_service.py` (V4.2,
+migration 014). The inbound half above is unchanged.
+
+## 12. Subscriptions (org-scoped, closed world)
+
+- `POST /api/v1/webhooks` (`webhooks:manage`, HIGH_IMPACT) creates an
+  endpoint: `https`-only URL, an event list drawn from the closed-world
+  `OUTBOUND_EVENT_TYPES` registry (10 event types), and a 32-byte signing
+  secret.
+- The secret is shown **exactly once** in the creation response; only its
+  Fernet ciphertext (key derived from `OUTBOUND_WEBHOOK_SECRET_KEY`) and a
+  4-char hint are stored. There is no "reveal again" path.
+- The URL is **immutable**: rotation means creating a new endpoint and
+  disabling the old one. `PATCH` may change only the event list.
+- Caps: `outbound_webhook_max_endpoints_per_org` (default 20) endpoints
+  per org, ≤ 25 events per endpoint; per-org and per-endpoint hourly rate
+  limits bound fan-out (Redis-backed, fail closed).
+- Cross-tenant access to get/patch/disable/replay is `404` — existence
+  is never confirmed to another organization.
+
+## 13. Delivery identity, signing and wire format
+
+- One delivery row per (endpoint, event). `UNIQUE(organization_id,
+  endpoint_id, event_type, delivery_id)` makes the identity DB-enforced:
+  a concurrent fan-out cannot create two rows for one event.
+- `delivery_id` is stable **across retries** — the same row, the same id,
+  never a new delivery per attempt.
+- Signed request headers: `x-cyvrix-delivery-id`, `x-cyvrix-event`,
+  `x-cyvrix-timestamp`, `x-cyvrix-signature: sha256=<hex>` — an HMAC-SHA-256
+  over `timestamp.delivery_id.event_version.body`. Receivers verify with a
+  constant-time comparison (`verify_receiver_side`).
+- The payload is a redacted, bounded JSON envelope (resource kind + id,
+  event type + version, occurrence time) — never repository content.
+
+## 14. SSRF protection (normative)
+
+`validate_webhook_url` runs at creation AND at every connection:
+
+- scheme must be `https`; no userinfo; no query/fragment; port bounded
+  (`_BLOCKED_PORTS` refused); length ≤ 2048.
+- the hostname is resolved and **every** answer must be a global unicast
+  address — private, loopback, link-local (incl. 169.254.169.254), CGNAT,
+  ULA, multicast and reserved ranges are refused
+  (`URL_RESOLVES_NON_GLOBAL`). A mixed answer set is a refusal, not a
+  pass-through.
+- resolver failure fails closed (`URL_RESOLUTION_FAILED`), logged loudly.
+- dispatch re-resolves at connection time (DNS-rebinding window) and
+  refuses dead (`ENDPOINT_DISABLED`, `URL_*`), without sending.
+- `follow_redirects=False` and `trust_env=False`: a redirect or proxy
+  environment can never pivot the request to internal infrastructure.
+- dispatches run in the WORKER, never inline in the API request path.
+
+## 15. Retry, dead-letter, audit
+
+- State machine (closed world): `PENDING → DELIVERING → DELIVERED |
+  RETRYING | FAILED → DEAD_LETTER`; `RETRYING → DELIVERING`. Illegal
+  transitions raise (`DeliveryStateError`), never silently apply.
+- 2xx → DELIVERED. 5xx/408/429 → TRANSIENT (bounded retries:
+  `outbound_webhook_max_attempts`, default 5) with exponential backoff
+  **full jitter** (base 60 s, cap 3600 s), scheduled through the
+  `webhook_deliveries` RQ queue. Any 4xx (and other non-transients) → no
+  retry. Exhausted → `FAILED → DEAD_LETTER` (both persisted: an attempt
+  that really happened is recorded honestly, so crash recovery can never
+  resend to a receiver that may have processed it).
+- The claim to an attempt is an atomic conditional UPDATE — concurrent
+  workers produce exactly one dispatch.
+- `WEBHOOK_*` audit events (closed world in
+  `services/audit_service.py`): `WEBHOOK_ENDPOINT_CREATED/UPDATED/DISABLED`,
+  `WEBHOOK_DELIVERY_CREATED/SUCCEEDED/FAILED/RETRY/DEAD_LETTER`.
+  Refused fan-out (`webhook_delivery_rejected_total`) never fakes success.
+- Real platform events are emitted best-effort by
+  `services/outbound_event_emitter.py` (scan outcomes, findings, CI
+  results, key rotation, V3 chain witnesses); a webhook failure never
+  fails the platform operation that caused it.
+
+Tests: `tests/test_v42_completion.py` — `TestOutboundUrlValidation`,
+`TestOutboundSecretsAndSigning`, `TestOutboundLifecycle`,
+`TestOutboundDispatch` (incl. stable identity across retries,
+concurrent-claim single dispatch, signed-request contents).

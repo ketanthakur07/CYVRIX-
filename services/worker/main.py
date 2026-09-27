@@ -77,6 +77,16 @@ def _heartbeat_loop(
             except Exception:
                 current_job = ""
             state = "DRAINING" if drain else "RUNNING"
+            # V4.2 completion — active_jobs (worker-side, real):
+            # the number of jobs this worker CURRENTLY owns/executes.
+            # RQ's standard worker executes exactly one job at a time, so
+            # the honest value is 1 while a job is held and 0 otherwise.
+            # Queued/failed/dead-lettered jobs are NOT active. The value
+            # is written into the bounded-TTL heartbeat hash, so a
+            # crashed worker's count expires with its liveness record
+            # (no permanently stuck gauge); lease-expiry reconciliation
+            # handles the underlying job claims independently.
+            active_jobs = 1 if current_job else 0
             pipe = conn.pipeline()
             pipe.hset(
                 worker_key,
@@ -84,6 +94,7 @@ def _heartbeat_loop(
                     "state": state,
                     "queues": ",".join(queues)[:200],
                     "current_job": (current_job or "")[:64],
+                    "active_jobs": str(active_jobs),
                     "last_heartbeat": str(int(time.time())),
                 },
             )
@@ -108,6 +119,9 @@ def main():
         Queue("scans", connection=conn),
         Queue("container_scans", connection=conn),
         Queue("log_analysis", connection=conn),
+        # V4.2 completion: outbound webhook deliveries (signed, bounded
+        # retries, dead-lettered) — processed by the same worker fleet.
+        Queue("webhook_deliveries", connection=conn),
         # V3.7 Phase 16: dead-letter queues are monitored for depth but
         # never processed automatically — dead jobs require explicit
         # operator recovery.

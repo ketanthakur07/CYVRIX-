@@ -41,3 +41,31 @@ def enqueue_log_analysis(scan_id: str):
         job_timeout=f"{settings.scan_timeout_minutes}m",
         result_ttl=3600,
     )
+
+
+def enqueue_outbound_webhook_delivery(delivery_row_id: str, delay_seconds: int = 0):
+    """Enqueue one outbound webhook delivery attempt (V4.2 completion).
+
+    The payload carries the delivery ROW id only — never URL, secret,
+    or payload content; the dispatcher re-reads trusted state. Retries
+    are scheduled with RQ's built-in delay so backoff+jitter is honored
+    without a polling loop.
+    """
+    from rq import Queue
+    queue = Queue("webhook_deliveries", connection=redis_conn)
+    if delay_seconds and delay_seconds > 0:
+        import datetime as _dt
+        queue.enqueue_in(
+            _dt.timedelta(seconds=int(delay_seconds)),
+            "worker.tasks.deliver_outbound_webhook",
+            delivery_row_id,
+            job_timeout="120s",
+            result_ttl=3600,
+        )
+    else:
+        queue.enqueue(
+            "worker.tasks.deliver_outbound_webhook",
+            delivery_row_id,
+            job_timeout="120s",
+            result_ttl=3600,
+        )

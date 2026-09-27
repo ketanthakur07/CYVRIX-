@@ -554,14 +554,27 @@ async def get_metrics(
         fleet = await fleet_snapshot(r)
         live = 0
         draining = 0
+        # V4.2 completion — active_jobs aggregation: the SUM of the
+        # per-worker `active_jobs` values published in the heartbeat
+        # hashes (jobs currently owned/executing). Only LIVE workers
+        # contribute — a crashed worker's entry has expired (bounded
+        # TTL), so its count cannot stick. A missing field counts as 0
+        # (older worker builds): never fabricated.
+        active_jobs = 0
         for info in (fleet.get("workers") or {}).values():
             state = (info.get("state") or "").upper()
             if state == "DRAINING":
                 draining += 1
             elif state in ("RUNNING", "BUSY"):
                 live += 1
+            raw_active = (info.get("active_jobs") or "0").strip()
+            try:
+                active_jobs += max(0, int(raw_active))
+            except (TypeError, ValueError):
+                pass  # honest omission: unparseable counts as absent
         set_gauge("cyvrix_workers_live", live)
         set_gauge("cyvrix_workers_draining", draining)
+        set_gauge("active_jobs", active_jobs)
         set_gauge("cyvrix_queue_depth_scans", max(0, int(await r.llen("rq:queue:scans"))))
         set_gauge("cyvrix_queue_depth_container_scans", max(0, int(await r.llen("rq:queue:container_scans"))))
         set_gauge("cyvrix_queue_depth_log_analysis", max(0, int(await r.llen("rq:queue:log_analysis"))))

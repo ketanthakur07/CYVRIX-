@@ -89,7 +89,7 @@ Events appended by V4.1 (closed-world registry in `audit_service`):
 | `API_KEY_REVOKED` | best-effort witness (the revocation itself is already committed and protective) | key lifecycle |
 | `API_KEY_EXPIRED` | reserved for the expiry sweeper | key lifecycle |
 | `WEBHOOK_ACCEPTED` / `WEBHOOK_REJECTED` / `WEBHOOK_REPLAY_REJECTED` | per §10 of v4-webhooks | webhook intake |
-| `CI_EVENT_RECEIVED` / `CI_EVENT_REJECTED` | reserved for the CI-event increment | CI intake |
+| `CI_EVENT_RECEIVED` / `CI_EVENT_ACCEPTED` / `CI_EVENT_REJECTED` / `CI_EVENT_REPLAYED` / `CI_EVENT_COMMIT_MISMATCH` / `CI_EVENT_REPOSITORY_MISMATCH` / `CI_EVENT_PROCESSING_STARTED` / `CI_EVENT_PROCESSING_COMPLETED` / `CI_EVENT_PROCESSING_FAILED` | shipped in V4.2 — the dedicated CI intake (`POST /api/ci/events`, scope `ci:ingest`); commit-mismatch and repository-mismatch events are SECURITY-CRITICAL witnesses, worker-verified | CI intake |
 | `SCAN_REQUESTED` | OPERATIONAL witness of the public mutation | `POST /api/v1/scans` |
 | `IDEMPOTENCY_CONFLICT` | OPERATIONAL probe signal | idempotency conflicts |
 | `QUOTA_LIMIT_REACHED` | OPERATIONAL | quota refusals |

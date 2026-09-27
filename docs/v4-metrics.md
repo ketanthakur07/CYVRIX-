@@ -72,11 +72,27 @@ class as the audit chain's.
 
 Counters are per-process. With multiple API replicas, scraped values are
 per-instance; aggregate by summing instances (standard Prometheus
-practice). `queue_depth`/`active_jobs` gauges are only populated when a
-worker pushes them (the analysis worker process currently logs queue
-depth rather than exporting it — a documented limitation, listed in
-`v4-public-api.md` §11). This is observability plumbing, not a security
+practice). This is observability plumbing, not a security
 control: correctness of rate limits and quotas does NOT depend on it.
+
+**V4.2 — worker `active_jobs` gauge (shipped).** Each worker's heartbeat
+(`services/worker/main.py` → `worker_runtime.heartbeat`, every 30 s) now
+writes `active_jobs` (1 when the worker owns a job, 0 when idle) into its
+Redis hash `cyvrix:worker:<name>`; the hash carries a 90 s TTL, so a
+crashed worker's contribution expires instead of sticking. The real gauge
+is exported fleet-wide by `GET /api/ops/metrics`, which sums the counts of
+live workers (unparseable or absent values contribute nothing). What the
+gauge does NOT count: queued-but-unstarted jobs (that is queue depth, a
+different signal — still not exported, see `v4-public-api.md` §11).
+
+**V4.2 — outbound webhook counters (shipped).**
+`webhook_endpoints_total`, `webhook_deliveries_created_total`,
+`webhook_deliveries_succeeded_total{event}`,
+`webhook_deliveries_retried_total{event}`,
+`webhook_deliveries_dead_lettered_total{event}` and
+`webhook_delivery_rejected_total{reason}` are registered in the closed
+world `_METRICS` catalog and incremented by the outbound delivery path
+(`v4-webhooks.md` §12–15).
 
 ---
 

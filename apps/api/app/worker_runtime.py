@@ -13,6 +13,12 @@ Nothing here authorizes anything: this is liveness telemetry and a
 deployment-control channel for jobs that are already authorized. The
 worker heartbeat payload contains identifiers only (queue names, job
 ids) — never credentials, never payload contents.
+
+V4.2 completion — active_jobs semantics (docs/v4-metrics.md §4):
+`active_jobs` is the number of jobs the worker CURRENTLY owns and is
+executing. Queued, failed, and dead-lettered jobs are NOT active. The
+platform-wide gauge is the SUM over live workers (heartbeat TTL bounds
+each contribution; a crashed worker's count expires with its record).
 """
 from __future__ import annotations
 
@@ -46,9 +52,15 @@ async def heartbeat(
     queues: list[str],
     current_job: Optional[str] = None,
     state: str = "RUNNING",
+    active_jobs: int = 0,
 ) -> None:
     """Record worker liveness. Bounded payload, bounded TTL — a crashed
-    worker's entry disappears on its own (fleet liveness is derivable)."""
+    worker's entry disappears on its own (fleet liveness is derivable).
+
+    V4.2 completion: `active_jobs` is this worker's REAL count of jobs
+    currently owned/executing (0 or 1 for a standard RQ worker). It
+    lives in the same bounded-TTL hash, so a crashed worker's count
+    expires with its liveness — no permanently stuck gauge."""
     now = int(time.time())
     try:
         pipe = redis.pipeline()
@@ -58,6 +70,7 @@ async def heartbeat(
                 "state": state,
                 "queues": ",".join(queues)[:200],
                 "current_job": (current_job or "")[:64],
+                "active_jobs": str(max(0, int(active_jobs))),
                 "last_heartbeat": str(now),
             },
         )

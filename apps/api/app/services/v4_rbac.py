@@ -276,6 +276,18 @@ API_SCOPES: frozenset[str] = frozenset({
     # Mutation: submits an analysis REQUEST only. The V3 chain still decides
     # everything that follows; this scope can never execute a remediation.
     "scans:create",
+    # ── V4.2 completion: mutation scopes, issuable ONLY because the
+    # enforcing endpoints now exist (docs/v4-public-api.md §"Scope →
+    # endpoint backing"). Each endpoint re-checks the tenant boundary and
+    # preserves the full V3 chain: a scope is permission to ASK, never
+    # permission to execute/approve/authorize.
+    "actions:create",       # POST /api/v1/actions — request-only proposal creation
+    "executions:create",    # POST /api/v1/executions — request-only; never consumes an authorization
+    "rollback:create",      # POST /api/v1/rollbacks — server-derived target via the V3.6 service
+    "integrations:manage",  # repository/integration management (no credential exposure)
+    "audit:export",         # GET /api/v1/audit/export — tenant-scoped NDJSON export
+    "webhooks:manage",      # outbound webhook endpoint management (/api/v1/webhooks)
+    "ci:ingest",            # dedicated CI event intake (POST /api/ci/events)
 })
 
 # Scopes that are DESIGNED but deliberately NOT ISSUABLE yet, because the
@@ -285,11 +297,6 @@ API_SCOPES: frozenset[str] = frozenset({
 # that does not exist is not. See docs/v4-public-api.md.
 PLANNED_API_SCOPES: frozenset[str] = frozenset({
     "findings:write",      # needs a finding-mutation endpoint
-    "actions:create",      # needs the request-only action submission endpoint
-    "executions:create",   # needs the async execution-request endpoint (Phase 38/51)
-    "rollback:create",     # needs the request-only rollback endpoint (Phase 40)
-    "integrations:manage", # needs the integration-mutation endpoint
-    "audit:export",        # needs the streaming export endpoint (Phase 41)
 })
 
 # Scopes whose issuance is an administrative act, and whose use has a
@@ -297,6 +304,16 @@ PLANNED_API_SCOPES: frozenset[str] = frozenset({
 # ORG_ADMIN standing (enforced in api_key_service.create_api_key).
 HIGH_IMPACT_API_SCOPES: frozenset[str] = frozenset({
     "scans:create",
+    # V4.2 completion: issuing a mutation/integration/CI/export key is an
+    # administrative act — every one of these requires at least ORG_ADMIN
+    # standing to issue (enforced in api_key_service.create_api_key).
+    "actions:create",
+    "executions:create",
+    "rollback:create",
+    "integrations:manage",
+    "audit:export",
+    "webhooks:manage",
+    "ci:ingest",
 })
 
 # Scopes that only read. Used by the public API's rate-limit classing so a

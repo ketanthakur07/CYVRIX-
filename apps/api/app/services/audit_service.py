@@ -67,11 +67,14 @@ class ActorType:
     SYSTEM = "SYSTEM"
     RECONCILER = "RECONCILER"
     GITHUB_INTEGRATION = "GITHUB_INTEGRATION"
+    # V4.2 completion: a CI credential is a SERVICE identity, never a user.
+    CI = "CI"
 
 
 VALID_ACTOR_TYPES = frozenset({
     ActorType.USER, ActorType.ADMIN, ActorType.WORKER, ActorType.EXECUTOR,
     ActorType.SYSTEM, ActorType.RECONCILER, ActorType.GITHUB_INTEGRATION,
+    ActorType.CI,
 })
 
 
@@ -157,6 +160,35 @@ EVENT_CRITICALITY: dict[str, str] = {
     # CI event lifecycle.
     "CI_EVENT_RECEIVED": Criticality.OPERATIONAL,
     "CI_EVENT_REJECTED": Criticality.SECURITY_CRITICAL,
+    # V4.2 completion — dedicated CI intake lifecycle. Accepted is
+    # OPERATIONAL (the scan request itself re-audits through the V4.1
+    # chain); replay/binding mismatches are SECURITY-CRITICAL refusals.
+    "CI_EVENT_ACCEPTED": Criticality.OPERATIONAL,
+    "CI_EVENT_REPLAYED": Criticality.SECURITY_CRITICAL,
+    "CI_EVENT_COMMIT_MISMATCH": Criticality.SECURITY_CRITICAL,
+    "CI_EVENT_REPOSITORY_MISMATCH": Criticality.SECURITY_CRITICAL,
+    "CI_EVENT_PROCESSING_STARTED": Criticality.OPERATIONAL,
+    "CI_EVENT_PROCESSING_COMPLETED": Criticality.OPERATIONAL,
+    "CI_EVENT_PROCESSING_FAILED": Criticality.OPERATIONAL,
+    # V4.2 completion — OUTBOUND webhook lifecycle. Endpoint lifecycle is
+    # SECURITY-CRITICAL (atomic with the endpoint row's state change);
+    # delivery progress events are OPERATIONAL (the delivery row is the
+    # security record; the chain event is the integrity witness).
+    "WEBHOOK_ENDPOINT_CREATED": Criticality.SECURITY_CRITICAL,
+    "WEBHOOK_ENDPOINT_UPDATED": Criticality.SECURITY_CRITICAL,
+    "WEBHOOK_ENDPOINT_DISABLED": Criticality.SECURITY_CRITICAL,
+    "WEBHOOK_DELIVERY_CREATED": Criticality.SECURITY_CRITICAL,
+    "WEBHOOK_DELIVERY_SUCCEEDED": Criticality.OPERATIONAL,
+    "WEBHOOK_DELIVERY_FAILED": Criticality.OPERATIONAL,
+    "WEBHOOK_DELIVERY_RETRY": Criticality.OPERATIONAL,
+    "WEBHOOK_DELIVERY_DEAD_LETTER": Criticality.OPERATIONAL,
+    # V4.2 completion — public-API mutation requests (request-only
+    # endpoints; the V3 chain still decides everything that follows).
+    "MUTATION_REQUESTED": Criticality.OPERATIONAL,
+    # Outbound integration management via integrations:manage.
+    "INTEGRATION_MANAGED": Criticality.OPERATIONAL,
+    # Tenant-scoped audit export via audit:export.
+    "AUDIT_EXPORTED": Criticality.OPERATIONAL,
     # Analysis request submitted through the public API.
     "SCAN_REQUESTED": Criticality.OPERATIONAL,
     # Idempotency conflict (a caller probing key reuse).

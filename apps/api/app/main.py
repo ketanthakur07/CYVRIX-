@@ -179,6 +179,30 @@ app.include_router(api_v1.router)
 from app.routes import webhooks as webhooks  # noqa: E402
 app.include_router(webhooks.router)
 
+# CYVRIX V4.2 completion — outbound webhook management (public API,
+# `webhooks:manage` scope). Configures organization-scoped HTTPS
+# receivers; delivers nothing itself and reaches nothing in the V3 chain.
+from app.routes import webhook_endpoints as webhook_endpoints  # noqa: E402
+app.include_router(webhook_endpoints.router)
+
+# CYVRIX V4.2 completion — dedicated CI event intake (SERVICE-class:
+# the caller is a CI system with a scoped `ci:ingest` key). Resolves
+# organization → installation → repository from trusted state only,
+# is DB-unique idempotent per (org, repository, event_id), and can
+# cause exactly one side effect: an analysis REQUEST. It can never
+# declare a security outcome and never reaches the V3 chain.
+from app.routes import ci_events as ci_events  # noqa: E402
+app.include_router(ci_events.router)
+
+# CYVRIX V4.2 completion — mutation-scope public API endpoints. The
+# scopes actions:create / executions:create / rollback:create /
+# integrations:manage / audit:export are issuable ONLY because these
+# endpoints enforce them; every endpoint re-checks the tenant boundary
+# and preserves the full V3 chain (request-only — nothing here executes,
+# approves, authorizes, or bypasses a gate).
+from app.routes import api_v1_mutations as api_v1_mutations  # noqa: E402
+app.include_router(api_v1_mutations.router)
+
 
 # ── V4.1 public API error contract (Phase 13/14) ─────────────────────
 #
@@ -194,6 +218,7 @@ from fastapi.exception_handlers import (  # noqa: E402
 )
 from starlette.exceptions import HTTPException as _StarletteHTTPException  # noqa: E402
 from app.routes.api_v1 import PublicApiError as _PublicApiError  # noqa: E402
+from app.routes.webhook_endpoints import OutApiError as _OutApiError  # noqa: E402
 from app.services.idempotency_service import (  # noqa: E402
     IdempotencyError as _IdempotencyError,
 )
@@ -275,6 +300,16 @@ def _safe_validation_details(exc) -> list[dict]:
 
 @app.exception_handler(_PublicApiError)
 async def _public_api_error_handler(request, exc: _PublicApiError):
+    return _public_envelope(
+        request, exc.status_code, exc.code, exc.message, exc.details
+    )
+
+
+@app.exception_handler(_OutApiError)
+async def _out_api_error_handler(request, exc: _OutApiError):
+    """V4.2 webhook-management errors share the public envelope: an SSRF
+    refusal (422) or a cross-tenant 404 is a client-visible contract,
+    never an unhandled 500."""
     return _public_envelope(
         request, exc.status_code, exc.code, exc.message, exc.details
     )

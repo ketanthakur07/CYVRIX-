@@ -212,9 +212,11 @@ Organization-scoped, class-based, fail-closed.
 | Audit | read + server-side verify; no write path |
 
 The single public mutation submits an analysis **request**. The
-`OPENAPI`-derived test `test_the_only_public_mutation_is_an_analysis_request`
-asserts this, so an accidental new mutation fails the build rather than
-shipping.
+`OPENAPI`-derived test in `TestNoChainBypass` asserts a CLOSED mutation
+set (V4.2: the scan request plus the request-only mutation endpoints of
+§2.1 — nothing else), so an accidental new mutation fails the build rather
+than shipping. A public key can never approve, authorize, mint a token, or
+execute: the V3 chain's write surface stays session/service-only.
 
 ---
 
@@ -243,23 +245,38 @@ deterministic answer, and a retry with a new key is a clean new attempt.
 
 Stated so none of it is assumed covered:
 
-- **Outbound webhooks** (signing, delivery ids, retry/backoff, dead-letter):
-  not implemented. (Inbound GitHub webhooks ARE implemented — signature
-  verification, delivery-id replay protection via the §4 primitive, and
-  installation → organization → repository binding from trusted state:
-  `v4-webhooks.md`.)
-- **CI event ingestion as a distinct event type**: CI integrates through
-  commit-bound scan submission with a scoped key; `CI_EVENT_*` audit events
-  are registered but the dedicated intake is not wired. There is still no
-  path by which CI states a security verdict.
-- **Mutation scopes** (`actions:create`, `executions:create`,
-  `rollback:create`, `integrations:manage`, `audit:export`): still designed,
-  still not issuable — no enforcing endpoint exists.
-- **Metrics gauges from workers**: `queue_depth`/`active_jobs` registered,
-  not yet exported by the worker process.
+- **`findings:write`**: remains planned, non-issuable — no endpoint
+  enforces it.
+- **`queue_depth` gauge export**: registered, not yet exported by the
+  worker process (`active_jobs` IS exported as of V4.2).
 - **Load-test certification at platform scale**: failure-injection and race
   suites run on real PostgreSQL + Redis; a bounded load-test harness remains
   outstanding.
+
+Shipped in V4.2 (previously listed here as not done):
+
+- **Outbound webhooks** — org-scoped subscriptions, HMAC-SHA-256 signing
+  with stable delivery ids, closed-world event registry, SSRF protection
+  (https-only, global-unicast-only resolution, connection-time
+  revalidation, no redirects, no proxy env), bounded retries with backoff +
+  full jitter, dead-letter, DB-unique idempotency, per-org/endpoint rate
+  limits, `WEBHOOK_*` audit events (`v4-webhooks.md` §12–15).
+- **Dedicated CI event intake** — `POST /api/ci/events` (`ci:ingest`,
+  HIGH_IMPACT): org→installation→repository resolved from trusted state
+  only, `event_id` idempotency on `UNIQUE(organization_id, repository_id,
+  event_id)`, worker-verified commit binding (`CI_EVENT_COMMIT_MISMATCH`),
+  full `CI_EVENT_*` audit chain, machine-readable results (`ACCEPTED` /
+  `REJECTED` / `ALREADY_PROCESSED` / `FAILED` / `UNAVAILABLE` — the result
+  is server-set and NEVER `PASS`; there is still no path by which CI
+  states a security verdict).
+- **Mutation scopes** (`actions:create`, `executions:create`,
+  `rollback:create`, `integrations:manage`, `audit:export`): now issuable
+  (HIGH_IMPACT — ORG_ADMIN standing required at issuance) with enforcing
+  request-only endpoints; the V3 chain is preserved unchanged
+  (`v4-public-api.md` §2.1).
+- **Worker `active_jobs` gauge**: heartbeat-published per worker,
+  fleet-aggregated on `GET /api/ops/metrics`, TTL crash recovery
+  (`v4-metrics.md` §4).
 
 ---
 
@@ -283,5 +300,7 @@ Stated so none of it is assumed covered:
 13. Cross-tenant access is impossible on every public endpoint.
 14. API errors reveal no secrets and no submitted values.
 15. Verification results are always server-computed.
-16. Webhooks and CI are not implemented, and are not advertised as if they
-    were.
+16. Webhooks and CI never state a security verdict: CI results are
+    server-set (`ACCEPTED`/`REJECTED`/`ALREADY_PROCESSED`/`FAILED`/
+    `UNAVAILABLE` — never `PASS`), and outbound webhook payloads carry no
+    repository content.

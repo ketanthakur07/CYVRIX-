@@ -63,6 +63,19 @@ _METRICS: dict[str, _MetricDef] = {
                    "Inbound webhook deliveries refused.", ("reason",)),
         _MetricDef("webhooks_replayed_total", "counter",
                    "Inbound webhook deliveries refused as replays.", ()),
+        # V4.2 completion — OUTBOUND webhook delivery counters.
+        _MetricDef("webhook_endpoints_total", "counter",
+                   "Outbound webhook endpoint lifecycle actions.", ("outcome",)),
+        _MetricDef("webhook_deliveries_created_total", "counter",
+                   "Outbound webhook deliveries created.", ("event",)),
+        _MetricDef("webhook_deliveries_succeeded_total", "counter",
+                   "Outbound webhook deliveries accepted (2xx).", ("event",)),
+        _MetricDef("webhook_deliveries_retried_total", "counter",
+                   "Outbound webhook deliveries scheduled for retry.", ("event",)),
+        _MetricDef("webhook_deliveries_dead_lettered_total", "counter",
+                   "Outbound webhook deliveries dead-lettered.", ("event",)),
+        _MetricDef("webhook_delivery_rejected_total", "counter",
+                   "Outbound deliveries refused before dispatch.", ("reason",)),
         _MetricDef("ci_events_total", "counter",
                    "CI-originated analysis requests received.", ("outcome",)),
         _MetricDef("jobs_created_total", "counter",
@@ -78,7 +91,9 @@ _METRICS: dict[str, _MetricDef] = {
         _MetricDef("queue_depth", "gauge",
                    "Analysis jobs waiting in the queue.", ()),
         _MetricDef("active_jobs", "gauge",
-                   "Analysis jobs currently executing.", ()),
+                   "Analysis jobs currently owned/executing by live "
+                   "workers (sum of worker-reported counts; a crashed "
+                   "worker's count expires with its heartbeat TTL).", ()),
         # V4.2 Phase 20/21 — live platform gauges. Worker fleet counts are
         # scalars by design: per-worker labels would mint an unbounded
         # time series per worker lifecycle (cardinality), so liveness is

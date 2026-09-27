@@ -575,6 +575,17 @@ async def rotate_api_key(
     except OrgError as exc:
         await db.rollback()
         raise _org_error(exc)
+    # V4.2 completion: fan the REAL rotation event out to subscribed
+    # webhook receivers (prefix + key id only — never the new secret).
+    try:
+        from app.services.outbound_event_emitter import emit_api_key_rotated
+        await emit_api_key_rotated(
+            organization_id=organization_id,
+            api_key_id=str(row.id),
+            key_prefix=row.prefix,
+        )
+    except Exception:  # noqa: BLE001 — fan-out must not break rotation
+        pass
     return ApiKeyCreated(
         id=str(row.id), name=row.name, prefix=row.prefix, scopes=list(row.scopes or []),
         created_at=_iso(row.created_at), expires_at=_iso(row.expires_at), secret=secret,

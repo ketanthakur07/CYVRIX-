@@ -57,16 +57,44 @@ endpoint that independently re-checks the organization and the V3 chain.
 | `audit:verify` | read | `GET /audit/chains/{chain_id}/verify` |
 | `integrations:read` | read | `GET /integrations` |
 | `scans:create` | **high** | `POST /scans` |
+| `actions:create` | **high** | `POST /actions` (V4.2) |
+| `executions:create` | **high** | `POST /executions` (V4.2) |
+| `rollback:create` | **high** | `POST /rollbacks` (V4.2) |
+| `integrations:manage` | **high** | `POST /integrations/repositories/{id}/(de)activate` (V4.2) |
+| `audit:export` | **high** | `GET /audit/export` (V4.2) |
+| `webhooks:manage` | **high** | `/webhooks` management (V4.2) |
+| `ci:ingest` | **high** | `POST /api/ci/events` (V4.2) |
 
 **Not issuable yet** (`PLANNED_API_SCOPES` in `services/v4_rbac.py`):
-`findings:write`, `actions:create`, `executions:create`, `rollback:create`,
-`integrations:manage`, `audit:export`. Each awaits the endpoint that would
-enforce it. They are rejected at issuance (`INVALID_API_KEY_SCOPES`) rather
-than accepted as inert decoration — a scope advertised as a control that does
-not exist is worse than no scope.
+`findings:write`. It awaits the endpoint that would enforce it. It is rejected
+at issuance (`INVALID_API_KEY_SCOPES`) rather than accepted as inert decoration
+— a scope advertised as a control that does not exist is worse than no scope.
 
 There is **no `admin:*`**, and no scope can manage members, policy,
 operations or quotas.
+
+### 2.1 V4.2 mutation semantics (request-only)
+
+The V3 chain is preserved and never bypassed:
+
+- `POST /actions` creates a **PROPOSAL** and nothing else. Policy may deny;
+  a denied proposal is persisted REJECTED for audit. No approval, no
+  authorization, no execution follows from a public key.
+- `POST /executions` is a validated **request view** of an existing
+  authorization + proposal. It never consumes the one-time token, mints
+  authorization material, or executes anything (V3.3/V3.4 boundaries).
+- `POST /rollbacks` delegates to the V3.6 rollback service; the target is
+  server-derived and the request body carries nothing security-relevant.
+- `POST /integrations/repositories/{id}/activate|deactivate` toggles scan
+  eligibility inside the caller's own installation. No credential is created,
+  returned, or logged.
+- `GET /audit/export` streams the caller's own org chain as deterministic
+  NDJSON; another organization's chain is 404 (existence never confirmed).
+- `/webhooks` management shows the signing secret exactly once at creation;
+  the URL is immutable (rotation = new endpoint); cross-tenant access is 404.
+
+All of the above scopes are **HIGH_IMPACT**: issuance requires ORG_ADMIN
+standing (enforced in `api_key_service.create_api_key`).
 
 ---
 
@@ -317,24 +345,39 @@ above rather than shipped silently, and was made before external adoption.
 
 So nothing here is mistaken for a shipped control:
 
-- **Outbound webhooks** (signing, delivery ids, retry, dead-letter) — not
-  implemented. The inbound GitHub webhook is implemented: see
-  `v4-webhooks.md`.
-- **Mutation scopes** — `actions:create`, `executions:create`,
-  `rollback:create`, `integrations:manage`, `audit:export` remain designed
-  but not issuable (§2): their request-only endpoints do not exist yet.
-- **CI event ingestion as a distinct event type** — CI integrates today by
-  submitting commit-bound scans through `POST /scans` with the thin GitHub
-  Action (`v4-cicd.md`); a dedicated CI-event intake with its own audit
-  events (`CI_EVENT_*`) is designed and registered but not wired.
+- **`findings:write`** — remains planned and non-issuable (§2); no
+  endpoint enforces it.
 - **`GET /api/v1/jobs` list and `POST /jobs/{id}/cancel`** — not
   implemented (`v4-async-jobs.md` §5 states the semantics honestly).
-- **Metrics gauges from workers** — `queue_depth`/`active_jobs` are
-  registered but not yet exported by the worker process (`v4-metrics.md`
-  §4).
+- **`queue_depth` gauge export** — registered; the worker exports
+  `active_jobs` (V4.2), per-queue depth is not yet surfaced
+  (`v4-metrics.md` §4).
 - **Load-test certification at platform scale** — failure-injection and
   race suites run on real PostgreSQL + Redis; a bounded load-test harness
   is still outstanding (see `roadmap-v3.md` V4.1 status).
+
+Shipped in V4.2 (previously listed here as not implemented):
+
+- **Outbound webhooks** — org-scoped subscriptions, HMAC-SHA-256 signing,
+  stable delivery ids across retries, closed-world event registry, SSRF
+  protection (https-only, private/loopback/link-local/metadata refused,
+  connection-time revalidation, no redirects), bounded retries with
+  backoff + full jitter, dead-letter, DB-unique idempotency, per-org and
+  per-endpoint rate limits, `WEBHOOK_*` audit events. See `v4-webhooks.md`
+  §6 and `services/outbound_webhook_service.py`.
+- **Mutation scopes** — `actions:create`, `executions:create`,
+  `rollback:create`, `integrations:manage`, `audit:export` are now issuable
+  (HIGH_IMPACT) with enforcing request-only endpoints (§2.1). The V3 chain
+  is preserved: a public key can never approve, authorize or execute.
+- **Dedicated CI event intake** — `POST /api/ci/events` with `ci:ingest`
+  key scope, org→installation→repository resolved from trusted state only,
+  `event_id` idempotency, worker-verified commit binding
+  (`CI_EVENT_COMMIT_MISMATCH`), the `CI_EVENT_*` audit chain, and
+  machine-readable results (`ACCEPTED` / `REJECTED` /
+  `ALREADY_PROCESSED` / `FAILED` / `UNAVAILABLE` — never `PASS`).
+- **Worker `active_jobs` gauge** — the worker heartbeat publishes its
+  live job count; `GET /api/ops/metrics` aggregates it across the fleet
+  with TTL-based crash recovery (`v4-metrics.md` §4).
 
 ---
 
@@ -343,10 +386,11 @@ So nothing here is mistaken for a shipped control:
 | Concern | Where |
 |---|---|
 | Scopes, rotation, idempotency, errors, pagination, isolation, headers, OpenAPI | `tests/test_v41_public_api.py` (48 tests) |
+| V4.2 completion: SSRF validation, signing, delivery lifecycle, CI intake, mutation-scope endpoints, active-jobs gauge | `tests/test_v42_completion.py` (34 tests; real-Redis test env-gated) |
 | Race safety on real PostgreSQL: rotate × rotate, rotate × revoke, revoke × N, duplicate idempotency × N, same-key-different-request | `tests/test_v41_races.py` (6 tests, 10 repetitions/class) |
 | Quota / webhook-replay / audit-chain races (real PostgreSQL + Redis) | `tests/test_v41_boundary_races.py` (5 tests, 10 repetitions/class) |
 | Webhooks: signatures, replay, bindings, allowlist, records | `tests/test_v41_webhooks.py` (25 tests) |
-| CI: commit binding, result semantics, action mapping | `tests/test_v41_cicd.py` (11 tests) |
+| CI: commit binding, result semantics, action mapping | `tests/test_v41_cicd.py` (14 tests) |
 | Failure injection: Redis/queue/audit failures | `tests/test_v41_failures.py` (6 tests) |
 | Audit integration, quotas, metrics, job semantics | `tests/test_v41_integration.py` (22 tests) |
 | Migration 013 tables + invariants | `tests/test_migrations.py` |

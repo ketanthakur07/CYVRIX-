@@ -108,11 +108,20 @@ class TestScopeRegistry:
         for bogus in ("", "admin:*", "SUPERUSER", "findings:read:all", "read"):
             assert rbac.is_valid_api_scope(bogus) is False
 
-    def test_execution_scopes_are_not_yet_issuable(self):
-        # Phase 38/51 endpoints do not exist; issuing their scope would
-        # advertise a control that is not enforced.
-        assert "executions:create" not in rbac.API_SCOPES
-        assert "executions:create" in rbac.PLANNED_API_SCOPES
+    def test_execution_scopes_are_issuable_only_with_endpoints(self):
+        # V4.2 COMPLETION: the request-only endpoints exist and enforce
+        # these scopes (POST /api/v1/executions, /actions, /rollbacks,
+        # integrations manage, audit export), so they are now issuable.
+        # findings:write REMAINS planned (no finding-mutation endpoint).
+        assert "executions:create" in rbac.API_SCOPES
+        assert "actions:create" in rbac.API_SCOPES
+        assert "rollback:create" in rbac.API_SCOPES
+        assert "integrations:manage" in rbac.API_SCOPES
+        assert "audit:export" in rbac.API_SCOPES
+        assert "webhooks:manage" in rbac.API_SCOPES
+        assert "ci:ingest" in rbac.API_SCOPES
+        assert "findings:write" in rbac.PLANNED_API_SCOPES
+        assert "findings:write" not in rbac.API_SCOPES
 
     def test_read_only_classification_fails_closed(self):
         assert rbac.key_is_read_only(list(READ_SCOPES)) is True
@@ -772,13 +781,40 @@ class TestNoChainBypass:
                     mutations.append((method.upper(), path))
         return sorted(mutations)
 
-    def test_the_only_public_mutation_is_an_analysis_request(self):
-        assert self._public_mutations() == [("POST", "/api/v1/scans")]
+    def test_public_mutations_are_the_closed_v42_set(self):
+        """V4.2 reconciliation: the public mutation surface is a CLOSED
+        set. V4.1 allowed exactly POST /api/v1/scans; V4.2 adds the
+        scope-gated, request-only mutation endpoints (actions/executions/
+        rollbacks/integrations/webhooks) that close documented gaps A–C.
+        Anything else appearing under /api/v1 fails here — the set may
+        only grow by consciously editing this list."""
+        assert self._public_mutations() == sorted([
+            ("POST", "/api/v1/scans"),
+            ("POST", "/api/v1/actions"),
+            ("POST", "/api/v1/executions"),
+            ("POST", "/api/v1/rollbacks"),
+            ("POST", "/api/v1/integrations/repositories/{repository_id}/activate"),
+            ("POST", "/api/v1/integrations/repositories/{repository_id}/deactivate"),
+            ("POST", "/api/v1/webhooks"),
+            ("PATCH", "/api/v1/webhooks/{endpoint_id}"),
+            ("POST", "/api/v1/webhooks/{endpoint_id}/disable"),
+            ("POST",
+             "/api/v1/webhooks/{endpoint_id}/deliveries/{delivery_id}/replay"),
+        ])
 
     def test_public_api_exposes_no_approval_or_execution_mutation(self):
+        """V4.2 reconciliation: `/executions` and `/rollbacks` exist but
+        are REQUEST-ONLY (a view of authorization state and a delegation
+        to the V3.6 rollback service — see test_v42_completion.py). What
+        must NEVER appear is the V3 chain's internal write surface:
+        approvals, authorization/token minting, execution runs."""
         for method, path in self._public_mutations():
-            assert "approve" not in path and "authorize" not in path
-            assert "execute" not in path and "rollback" not in path
+            assert "approve" not in path
+            assert "authorize" not in path
+            assert "token" not in path
+            assert "approval" not in path
+            assert "execution-runs" not in path
+            assert "execution_authorizations" not in path
 
     def test_public_api_does_not_re_export_internal_mutations(self):
         from app.main import app

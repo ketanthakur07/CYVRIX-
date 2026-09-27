@@ -78,14 +78,22 @@ Delivered (increment 2 — "external integration boundary"):
 
 Remaining (explicit, not claimed):
 
-- outbound webhooks (signing, delivery, retry, dead-letter)
-- dedicated CI-event intake with `CI_EVENT_*` audit events (CI integrates
-  today via commit-bound scan submission)
-- request-only endpoints for `actions:create`, `executions:create`,
-  `rollback:create`, `integrations:manage`, `audit:export` (scopes stay
-  unissuable until then)
-- worker-side export of `queue_depth`/`active_jobs` gauges
 - bounded load-test harness at platform scale
+
+Shipped in V4.2 (previously listed here as remaining):
+
+- outbound webhooks (signing, stable delivery ids, bounded retry with
+  backoff + jitter, dead-letter, SSRF protection, per-org/endpoint rate
+  limits) — `docs/v4-webhooks.md` §12–15
+- dedicated CI-event intake with the full `CI_EVENT_*` audit chain
+  (`POST /api/ci/events`, `ci:ingest` scope, worker-verified commit
+  binding)
+- request-only endpoints for `actions:create`, `executions:create`,
+  `rollback:create`, `integrations:manage`, `audit:export` (all
+  HIGH_IMPACT; issuance requires ORG_ADMIN standing; the V3 chain stays
+  request-only — public keys never approve, authorize or execute)
+- worker-side export of the `active_jobs` gauge with fleet aggregation
+  and TTL crash recovery (`queue_depth` remains not exported)
 
 ---
 

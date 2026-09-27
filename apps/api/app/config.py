@@ -71,6 +71,25 @@ class Settings(BaseSettings):
     webhook_rate_limit_per_hour: int = 1200      # per organization
     webhook_ip_rate_limit_per_hour: int = 240    # pre-authentication, per source IP
 
+    # V4.2 completion — OUTBOUND webhooks. The Fernet key is derived from
+    # this value, which lives OUTSIDE the database (same trust model as
+    # the V3.8 audit checkpoint key). Empty DISABLES outbound webhooks
+    # entirely (fail closed: no endpoint can be created or delivered to).
+    outbound_webhook_secret_key: str = ""
+    outbound_webhook_max_payload_bytes: int = 262_144        # 256 KiB per delivery body
+    outbound_webhook_max_endpoints_per_org: int = 20
+    outbound_webhook_max_events_per_endpoint: int = 25
+    outbound_webhook_rate_per_hour_per_org: int = 600        # fan-out ceiling
+    outbound_webhook_rate_per_hour_per_endpoint: int = 240   # per-endpoint ceiling
+    outbound_webhook_max_attempts: int = 5                   # bounded retries
+    outbound_webhook_backoff_base_seconds: int = 60          # exponential base
+    outbound_webhook_backoff_max_seconds: int = 3600         # hard backoff cap
+    outbound_webhook_delivery_timeout_seconds: float = 10.0  # per attempt
+
+    # V4.2 completion — dedicated CI event intake (POST /api/ci/events)
+    ci_event_max_payload_bytes: int = 65_536                 # 64 KiB bounded intake
+    ci_event_rate_limit_per_hour: int = 120                  # per credential
+
     # V4.1 — organization quotas (server-owned; no client can raise them)
     quota_scans_org_per_day: int = 200
     quota_scans_global_per_day: int = 5000
@@ -148,6 +167,16 @@ class Settings(BaseSettings):
         "audit_alert_rate_limit_per_hour",
         "webhook_rate_limit_per_hour",
         "webhook_ip_rate_limit_per_hour",
+        "outbound_webhook_max_payload_bytes",
+        "outbound_webhook_max_endpoints_per_org",
+        "outbound_webhook_max_events_per_endpoint",
+        "outbound_webhook_rate_per_hour_per_org",
+        "outbound_webhook_rate_per_hour_per_endpoint",
+        "outbound_webhook_max_attempts",
+        "outbound_webhook_backoff_base_seconds",
+        "outbound_webhook_backoff_max_seconds",
+        "ci_event_max_payload_bytes",
+        "ci_event_rate_limit_per_hour",
     )
     @classmethod
     def validate_ops_limits_positive(cls, v: int, info) -> int:
@@ -166,6 +195,16 @@ class Settings(BaseSettings):
             "audit_alert_rate_limit_per_hour": (1, 10_000),
             "webhook_rate_limit_per_hour": (1, 100_000),
             "webhook_ip_rate_limit_per_hour": (1, 100_000),
+            "outbound_webhook_max_payload_bytes": (1_024, 1_048_576),
+            "outbound_webhook_max_endpoints_per_org": (1, 200),
+            "outbound_webhook_max_events_per_endpoint": (1, 50),
+            "outbound_webhook_rate_per_hour_per_org": (1, 100_000),
+            "outbound_webhook_rate_per_hour_per_endpoint": (1, 100_000),
+            "outbound_webhook_max_attempts": (1, 10),
+            "outbound_webhook_backoff_base_seconds": (1, 3_600),
+            "outbound_webhook_backoff_max_seconds": (10, 86_400),
+            "ci_event_max_payload_bytes": (1_024, 1_048_576),
+            "ci_event_rate_limit_per_hour": (1, 100_000),
         }
         low, high = bounds[info.field_name]
         if not isinstance(v, int) or v < low or v > high:

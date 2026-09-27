@@ -242,7 +242,11 @@ class ActionProposal(Base):
     finding_id = Column(UUID(as_uuid=True), ForeignKey("findings.id"), nullable=False)
     recommendation_id = Column(UUID(as_uuid=True), ForeignKey("recommendations.id"), nullable=False)
     repository_id = Column(UUID(as_uuid=True), ForeignKey("repositories.id"), nullable=False)
-    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    # V4.2 completion: NULL when the proposal was created by an
+    # organization API key (public API). The actor is then witnessed in
+    # the V3.8 chain by key prefix — a user attribution is never
+    # fabricated for a credential.
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
 
     action_type = Column(Text, nullable=False)  # ActionType values only
     status = Column(Text, nullable=False, default="PROPOSED")  # PROPOSED|POLICY_CHECKED|REJECTED|EXPIRED|STALE
@@ -795,7 +799,10 @@ class RollbackRun(Base):
     cleanup_status = Column(Text, nullable=False, default="NOT_STARTED")
     cleanup_detail = Column(Text)
 
-    requested_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    # V4.2 completion: NULL when the rollback was requested by an
+    # organization API key (public API); the key identity is witnessed
+    # in the V3.8 chain instead of fabricating a user attribution.
+    requested_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), default=utcnow)
     finished_at = Column(DateTime(timezone=True))
 
@@ -1434,4 +1441,185 @@ class WebhookDelivery(Base):
         Index("ix_webhook_deliveries_org", "organization_id"),
         Index("ix_webhook_deliveries_outcome", "outcome"),
         Index("ix_webhook_deliveries_received", "received_at"),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# V4.2 COMPLETION — Outbound webhooks (organization-scoped subscriptions)
+#
+# organization → endpoint (https URL + encrypted signing secret) →
+# subscribed events → deliveries (signed, retried, dead-lettered).
+#
+# SECURITY MODEL:
+#   - The signing secret is stored ENCRYPTED AT REST (Fernet, key held
+#     OUTSIDE the database via settings) and is returned exactly once at
+#     creation; it is never logged, never audited, never exported.
+#   - The endpoint URL is validated at creation/update AND re-validated
+#     at the connection (IP allowlist at socket time) — SSRF defense
+#     does not trust a string prefix or a single DNS resolution.
+#   - Delivery identity: (organization, endpoint, event_type,
+#     delivery_id) is UNIQUE at the DB level; retries reuse the SAME
+#     delivery_id, so a retry can never mint a duplicate logical event.
+# ══════════════════════════════════════════════════════════════════════
+
+
+class OutboundWebhookEndpoint(Base):
+    """One subscribed HTTPS receiver owned by one organization.
+
+    secret_ciphertext is Fernet-encrypted (settings-owned key). It is
+    readable by the dispatcher because HMAC signing requires the secret,
+    but it is NEVER serialized by any route and NEVER written to audit,
+    logs, metrics, or exports. `secret_hint` (first 4 chars) exists only
+    so an operator can tell which secret generation a receiver uses.
+    """
+
+    __tablename__ = "outbound_webhook_endpoints"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    organization_id = Column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+    )
+    url = Column(Text, nullable=False)  # https-only, SSRF-validated
+    description = Column(Text)
+    # ACTIVE | DISABLED (disabled endpoints receive nothing new)
+    status = Column(Text, nullable=False, default="ACTIVE")
+    # Closed-world event-type allowlist (subset of OUTBOUND_EVENT_TYPES).
+    events = Column(JSONB, nullable=False, default=list)
+    # Fernet token over the signing secret. The plaintext secret never
+    # appears in any column of any table.
+    secret_ciphertext = Column(Text, nullable=False)
+    secret_hint = Column(Text, nullable=False, default="")
+    secret_key_version = Column(Integer, nullable=False, default=1)
+    disabled_at = Column(DateTime(timezone=True))
+    created_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        Index("ix_outbound_endpoints_org", "organization_id"),
+        Index(
+            "ix_outbound_endpoints_org_active",
+            "organization_id",
+            postgresql_where=text("status = 'ACTIVE'"),
+            sqlite_where=text("status = 'ACTIVE'"),
+        ),
+    )
+
+
+class OutboundWebhookDelivery(Base):
+    """One logical outbound delivery (identity is stable across retries).
+
+    Invariants:
+      - UNIQUE(organization_id, endpoint_id, event_type, delivery_id):
+        the same event delivered to the same endpoint is ONE row, no
+        matter how many times it is retried or re-enqueued.
+      - state machine is closed-world: PENDING → DELIVERING →
+        DELIVERED | RETRYING | FAILED → DEAD_LETTER; illegal transitions
+        raise (fail closed in the dispatcher).
+      - `payload` is the bounded, secret-free body that was signed; the
+        HMAC secret itself is reconstructed in memory per attempt only.
+    """
+
+    __tablename__ = "outbound_webhook_deliveries"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    organization_id = Column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+    )
+    endpoint_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("outbound_webhook_endpoints.id"),
+        nullable=False,
+    )
+    event_type = Column(Text, nullable=False)  # OUTBOUND_EVENT_TYPES member
+    event_version = Column(Integer, nullable=False, default=1)
+    # Stable identity across retries — this is the id the receiver sees
+    # and the id the state machine keys on.
+    delivery_id = Column(Text, nullable=False)
+    # PENDING | DELIVERING | DELIVERED | RETRYING | FAILED | DEAD_LETTER
+    state = Column(Text, nullable=False, default="PENDING")
+    attempt = Column(Integer, nullable=False, default=0)
+    next_attempt_at = Column(DateTime(timezone=True))
+    # Bounded, secret-free event body (already redacted by the producer).
+    payload = Column(JSONB, nullable=False, default=dict)
+    last_http_status = Column(Integer)
+    last_error = Column(Text)  # bounded classification, never raw secrets
+    delivered_at = Column(DateTime(timezone=True))
+    dead_lettered_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id", "endpoint_id", "event_type", "delivery_id",
+            name="uq_outbound_deliveries_identity",
+        ),
+        Index(
+            "ix_outbound_deliveries_due",
+            "state", "next_attempt_at",
+            postgresql_where=text(
+                "state IN ('PENDING', 'RETRYING')"
+            ),
+            sqlite_where=text(
+                "state IN ('PENDING', 'RETRYING')"
+            ),
+        ),
+        Index("ix_outbound_deliveries_org", "organization_id"),
+        Index("ix_outbound_deliveries_state", "state"),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# V4.2 COMPLETION — Dedicated CI event intake (POST /api/ci/events)
+#
+# A CI event is a SECURITY RECORD of what an authenticated CI credential
+# reported. Identity chain: CI API key → organization → installation →
+# repository, ALL resolved from trusted server state — the payload can
+# never nominate any of them. Commit binding reuses the V4.1 mechanism:
+# requested_commit_sha is server-set and worker-VERIFIED at clone time.
+# ══════════════════════════════════════════════════════════════════════
+
+
+class CiEvent(Base):
+    """One received CI event (accepted, replayed, or refused).
+
+    Fields are identity/binding/outcome only. CI metadata (run ids,
+    workflow names) is stored bounded and redacted; CI can never claim
+    security outcome through any column here — result is SERVER-set.
+    """
+
+    __tablename__ = "ci_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    organization_id = Column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=True
+    )
+    # The credential that produced this event (audit forensics only).
+    api_key_prefix = Column(Text)
+    # Server-side idempotency identity: the caller-supplied event_id,
+    # scoped by (organization, repository). UNIQUE backstop below.
+    event_id = Column(Text, nullable=False)
+    repository_id = Column(
+        UUID(as_uuid=True), ForeignKey("repositories.id"), nullable=True
+    )
+    commit_sha = Column(Text)
+    ref = Column(Text)
+    provider = Column(Text, nullable=False, default="github")
+    # ACCEPTED | REJECTED | REPLAY
+    outcome = Column(Text, nullable=False)
+    result = Column(Text)  # SERVER-computed only (never CI-declared)
+    reason_code = Column(Text)  # bounded allowlist
+    scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.id"), nullable=True)
+    received_at = Column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        # One logical CI event per tenant per repository. Replays are
+        # refused at the DB level even if the reservation TTL lapsed.
+        UniqueConstraint(
+            "organization_id", "repository_id", "event_id",
+            name="uq_ci_events_org_repo_event",
+        ),
+        Index("ix_ci_events_org", "organization_id"),
+        Index("ix_ci_events_outcome", "outcome"),
+        Index("ix_ci_events_received", "received_at"),
     )
